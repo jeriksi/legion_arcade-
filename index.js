@@ -378,22 +378,38 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
 // ЛИДЕРБОРД
 // ============================================================
 app.post('/api/scores', (req, res) => {
-    const { gameId, nickname, score, lowerIsBetter } = req.body;
+    const { gameId, nickname, score, lowerIsBetter, losses = 0 } = req.body;
     if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
     if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
 
-    const entry = { nickname: nickname || 'Игрок', score, date: Date.now(), id: crypto.randomUUID() };
-    leaderboards[gameId].push(entry);
+    // Ищем, есть ли уже этот игрок в таблице (чтобы обновлять его рекорд, а не спамить)
+    let existing = leaderboards[gameId].find(x => x.nickname === nickname);
+    
+    if (existing) {
+        if (lowerIsBetter) {
+            if (score < existing.score) existing.score = score;
+        } else {
+            if (score > existing.score) existing.score = score;
+        }
+        existing.losses = Math.max(existing.losses || 0, losses);
+        existing.date = Date.now();
+    } else {
+        leaderboards[gameId].push({ 
+            nickname: nickname || 'Игрок', 
+            score, 
+            losses, 
+            date: Date.now(), 
+            id: crypto.randomUUID() 
+        });
+    }
 
-    // Сортируем: если lowerIsBetter (время в сапере) - по возрастанию, иначе по убыванию
     leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
-    leaderboards[gameId] = leaderboards[gameId].slice(0, 10); // Оставляем только Топ-10
+    leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
 
-    res.json({ success: true, rank: leaderboards[gameId].findIndex(x => x.id === entry.id) + 1 });
+    res.json({ success: true });
 });
-
 app.get('/api/scores/:gameId', (req, res) => {
     const scores = leaderboards[req.params.gameId] || [];
     res.json({ success: true, scores });
