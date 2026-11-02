@@ -3,6 +3,14 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const http = require('http');
+const { WebSocketServer } = require('ws');
+
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+const pongRooms = {}; 
+
 app.use(express.json());
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
