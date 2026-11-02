@@ -250,6 +250,165 @@ const CH = (() => {
 })();
 
 // ============================================================
+// WEBSOCKET: ПОНГ ОНЛАЙН
+// ============================================================
+wss.on('connection', (ws) => {
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            
+            if (data.type === 'join') {
+                // Ищем свободную комнату
+                let roomId = Object.keys(pongRooms).find(id => pongRooms[id].players.length === 1);
+                
+                if (!roomId) {
+                    roomId = crypto.randomUUID();
+                    pongRooms[roomId] = {
+                        id: roomId,
+                        players: [],
+                        ball: { x: 200, y: 150, vx: 5, vy: 3 },
+                        score: { p1: 0, p2: 0 },
+                        state: 'waiting', // waiting, playing, finished
+                        lastTime: Date.now()
+                    };
+                }
+
+                const room = pongRooms[roomId];
+                const playerIndex = room.players.length; // 0 или 1
+                
+                room.players.push({
+                    id: data.playerId,
+                    nickname: data.nickname,
+                    ws: ws,
+                    paddleY: 150, // Начальная позиция ракетки
+                    index: playerIndex
+                });
+
+                ws.roomId = roomId;
+                ws.playerIndex = playerIndex;
+
+                if (room.players.length === 2) {
+                    room.state = 'playing';
+                    room.lastTime = Date.now();
+                    
+                    // Запускаем игровой цикл для этой комнаты
+                    room.interval = setInterval(() => {
+                        if (room.state !== 'playing') return;
+                        
+                        const now = Date.now();
+                        const dt = (now - room.lastTime) / 16.66; // Нормализация к 60 fps
+                        room.lastTime = now;
+
+                        // Физика мяча
+                        room.ball.x += room.ball.vx * dt;
+                        room.ball.y += room.ball.vy * dt;
+
+                        // Отбивание от стен
+                        if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
+                        if (room.ball.y >= 300 - 10) { room.ball.y = 300 - 10; room.ball.vy *= -1; }
+
+                        // Логика ракеток
+                        const p1 = room.players[0];
+                        const p2 = room.players[1];
+                        const p1Y = p1.paddleY - 30;
+                        const p2Y = p2.paddleY - 30;
+
+                        // Столкновение с ракеткой 1 (слева)
+                        if (room.ball.x <= 8 && room.ball.x + 10 >= 0) {
+                            if (room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
+                                room.ball.x = 8;
+                                room.ball.vx *= -1.1;
+                                const hitPos = (room.ball.y - p1Y) / 60;
+                                room.ball.vy = (hitPos - 0.5) * 10;
+                            }
+                        }
+                        // Столкновение с ракеткой 2 (справа)
+                        if (room.ball.x + 10 >= 400 - 8) {
+                            if (room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
+                                room.ball.x = 400 - 8 - 10;
+                                room.ball.vx *= -1.1;
+                                const hitPos = (room.ball.y - p2Y) / 60;
+                                room.ball.vy = (hitPos - 0.5) * 10;
+                            }
+                        }
+
+                        // Ограничение скорости
+                        room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
+                        room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
+
+                        // Голы
+                        if (room.ball.x < 0) {
+                            room.score.p2++;
+                            resetBall(room);
+                        } else if (room.ball.x > 400) {
+                            room.score.p1++;
+                            resetBall(room);
+                        }
+
+                        // Проверка на победу
+                        if (room.score.p1 >= 7 || room.score.p2 >= 7) {
+                            room.state = 'finished';
+                            clearInterval(room.interval);
+                        }
+
+                        // Отправляем состояние обоим игрокам
+                        const stateToSend = JSON.stringify({
+                            type: 'state',
+                            ball: room.ball,
+                            score: room.score,
+                            p1Y: p1.paddleY,
+                            p2Y: p2.paddleY,
+                            state: room.state
+                        });
+                        room.players.forEach(p => {
+                            if (p.ws.readyState === 1) p.ws.send(stateToSend);
+                        });
+
+                    }, 1000 / 60); // 60 fps
+                }
+
+                ws.send(JSON.stringify({ 
+                    type: 'joined', 
+                    roomId: roomId, 
+                    playerIndex: playerIndex,
+                    opponent: room.players.length === 2 ? (playerIndex === 0 ? room.players[1].nickname : room.players[0].nickname) : null
+                }));
+            }
+
+            if (data.type === 'move') {
+                const room = pongRooms[ws.roomId];
+                if (room && room.state === 'playing') {
+                    const player = room.players[ws.playerIndex];
+                    if (player) player.paddleY = data.y;
+                }
+            }
+
+        } catch (e) { console.error('WS Error:', e); }
+    });
+
+    ws.on('close', () => {
+        const room = pongRooms[ws.roomId];
+        if (room) {
+            room.state = 'finished';
+            clearInterval(room.interval);
+            room.players.forEach(p => {
+                if (p.ws !== ws && p.ws.readyState === 1) {
+                    p.ws.send(JSON.stringify({ type: 'opponent_left' }));
+                }
+            });
+            delete pongRooms[ws.roomId];
+        }
+    });
+});
+
+function resetBall(room) {
+    room.ball = { x: 200, y: 150, vx: Math.random() > 0.5 ? 5 : -5, vy: (Math.random() - 0.5) * 6 };
+}
+
+// МЕНЯЕМ app.listen НА server.listen
+server.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
+
+// ============================================================
 // КОНСТАНТЫ
 // ============================================================
 const MATCHMAKING_TIMEOUT = 30 * 1000;       // 30 сек ожидания соперника
