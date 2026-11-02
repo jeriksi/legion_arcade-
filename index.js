@@ -144,6 +144,104 @@ const CK = (() => {
 })();
 
 // ============================================================
+// ДВИЖОК ШАХМАТ
+// ============================================================
+const CH = (() => {
+    const isW = (p) => p === p.toUpperCase();
+    const colorOf = (p) => (isW(p) ? 'w' : 'b');
+    const KN = [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]];
+    const KG = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
+    const DIAG = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
+    const ORTH = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    
+    function fromFEN(fen) {
+        const parts = fen.split(' '); const b = [];
+        for (const ch of parts[0]) {
+            if (ch === '/') continue;
+            if (ch >= '1' && ch <= '8') for (let k = 0; k < Number(ch); k++) b.push(null);
+            else b.push(ch);
+        }
+        const cast = parts[2] || '-', ep = parts[3] || '-';
+        return { b, turn: parts[1] || 'w', c: { K: cast.includes('K'), Q: cast.includes('Q'), k: cast.includes('k'), q: cast.includes('q') }, ep: ep === '-' ? -1 : (8 - Number(ep[1])) * 8 + (ep.charCodeAt(0) - 97), hm: Number(parts[4]) || 0 };
+    }
+    const startPos = () => fromFEN('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+    
+    function attacked(pos, sq, by) {
+        const b = pos.b, r = sq >> 3, c = sq & 7, pr = by === 'w' ? r + 1 : r - 1;
+        if (pr >= 0 && pr < 8) { const P = by === 'w' ? 'P' : 'p'; if (c > 0 && b[pr * 8 + c - 1] === P) return true; if (c < 7 && b[pr * 8 + c + 1] === P) return true; }
+        const N = by === 'w' ? 'N' : 'n', K = by === 'w' ? 'K' : 'k';
+        for (const [dr, dc] of KN) { const rr = r + dr, cc = c + dc; if (rr >= 0 && rr < 8 && cc >= 0 && cc < 8 && b[rr * 8 + cc] === N) return true; }
+        for (const [dr, dc] of KG) { const rr = r + dr, cc = c + dc; if (rr >= 0 && rr < 8 && cc >= 0 && cc < 8 && b[rr * 8 + cc] === K) return true; }
+        const B = by === 'w' ? 'B' : 'b', R = by === 'w' ? 'R' : 'r', Q = by === 'w' ? 'Q' : 'q';
+        for (const [dr, dc] of DIAG) { let rr = r + dr, cc = c + dc; while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) { const p = b[rr * 8 + cc]; if (p) { if (p === B || p === Q) return true; break; } rr += dr; cc += dc; } }
+        for (const [dr, dc] of ORTH) { let rr = r + dr, cc = c + dc; while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) { const p = b[rr * 8 + cc]; if (p) { if (p === R || p === Q) return true; break; } rr += dr; cc += dc; } }
+        return false;
+    }
+    
+    function inCheck(pos, color) { const k = pos.b.indexOf(color === 'w' ? 'K' : 'k'); return k >= 0 && attacked(pos, k, color === 'w' ? 'b' : 'w'); }
+    
+    function make(pos, m) {
+        const b = pos.b.slice(), me = pos.turn, p = b[m.from], cap = b[m.to];
+        b[m.to] = m.promo ? (me === 'w' ? m.promo.toUpperCase() : m.promo.toLowerCase()) : p; b[m.from] = null;
+        if (m.flag === 'ep') b[m.to + (me === 'w' ? 8 : -8)] = null;
+        if (m.flag === 'ck') { const [f, t] = me === 'w' ? [63, 61] : [7, 5]; b[t] = b[f]; b[f] = null; }
+        if (m.flag === 'cq') { const [f, t] = me === 'w' ? [56, 59] : [0, 3]; b[t] = b[f]; b[f] = null; }
+        const c = { K: pos.c.K, Q: pos.c.Q, k: pos.c.k, q: pos.c.q };
+        if (p === 'K') { c.K = false; c.Q = false; } if (p === 'k') { c.k = false; c.q = false; }
+        for (const sq of [m.from, m.to]) { if (sq === 63) c.K = false; if (sq === 56) c.Q = false; if (sq === 7) c.k = false; if (sq === 0) c.q = false; }
+        const pawn = p === 'P' || p === 'p';
+        return { b, turn: me === 'w' ? 'b' : 'w', c, ep: m.flag === 'dbl' ? (m.from + m.to) / 2 : -1, hm: (pawn || cap || m.flag === 'ep') ? 0 : pos.hm + 1 };
+    }
+    
+    function legal(pos) {
+        const me = pos.turn, opp = me === 'w' ? 'b' : 'w', b = pos.b, out = [];
+        const add = (from, to, flag, promo) => out.push({ from, to, flag, promo });
+        const addPawn = (from, to, promoRow) => { if ((to >> 3) === promoRow) for (const pr of ['q', 'r', 'b', 'n']) add(from, to, undefined, pr); else add(from, to); };
+        for (let i = 0; i < 64; i++) {
+            const p = b[i]; if (!p || colorOf(p) !== me) continue;
+            const t = p.toLowerCase(), r = i >> 3, c = i & 7;
+            if (t === 'p') {
+                const dir = me === 'w' ? -1 : 1, startRow = me === 'w' ? 6 : 1, promoRow = me === 'w' ? 0 : 7;
+                const nr = r + dir;
+                if (nr >= 0 && nr < 8) {
+                    if (!b[nr * 8 + c]) { addPawn(i, nr * 8 + c, promoRow); if (r === startRow && !b[(nr + dir) * 8 + c]) add(i, (nr + dir) * 8 + c, 'dbl'); }
+                    for (const dc of [-1, 1]) {
+                        const cc = c + dc; if (cc < 0 || cc > 7) continue;
+                        const to = nr * 8 + cc, q = b[to];
+                        if (q && colorOf(q) !== me) addPawn(i, to, promoRow);
+                        else if (!q && to === pos.ep) add(i, to, 'ep');
+                    }
+                }
+            } else if (t === 'n' || t === 'k') {
+                for (const [dr, dc] of (t === 'n' ? KN : KG)) { const rr = r + dr, cc = c + dc; if (rr < 0 || rr > 7 || cc < 0 || cc > 7) continue; const q = b[rr * 8 + cc]; if (!q || colorOf(q) !== me) add(i, rr * 8 + cc); }
+                if (t === 'k') {
+                    if (me === 'w' && i === 60) {
+                        if (pos.c.K && b[63] === 'R' && !b[61] && !b[62] && !attacked(pos, 60, opp) && !attacked(pos, 61, opp) && !attacked(pos, 62, opp)) add(60, 62, 'ck');
+                        if (pos.c.Q && b[56] === 'R' && !b[57] && !b[58] && !b[59] && !attacked(pos, 60, opp) && !attacked(pos, 59, opp) && !attacked(pos, 58, opp)) add(60, 58, 'cq');
+                    } else if (me === 'b' && i === 4) {
+                        if (pos.c.k && b[7] === 'r' && !b[5] && !b[6] && !attacked(pos, 4, opp) && !attacked(pos, 5, opp) && !attacked(pos, 6, opp)) add(4, 6, 'ck');
+                        if (pos.c.q && b[0] === 'r' && !b[1] && !b[2] && !b[3] && !attacked(pos, 4, opp) && !attacked(pos, 3, opp) && !attacked(pos, 2, opp)) add(4, 2, 'cq');
+                    }
+                }
+            } else {
+                const dirs = t === 'b' ? DIAG : t === 'r' ? ORTH : DIAG.concat(ORTH);
+                for (const [dr, dc] of dirs) {
+                    let rr = r + dr, cc = c + dc;
+                    while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) { const q = b[rr * 8 + cc]; if (!q) add(i, rr * 8 + cc); else { if (colorOf(q) !== me) add(i, rr * 8 + cc); break; } rr += dr; cc += dc; }
+                }
+            }
+        }
+        return out.filter((m) => !inCheck(make(pos, m), me));
+    }
+    
+    const key = (pos) => pos.b.map((p) => p || '.').join('') + pos.turn + (pos.c.K ? 'K' : '') + (pos.c.Q ? 'Q' : '') + (pos.c.k ? 'k' : '') + (pos.c.q ? 'q' : '') + pos.ep;
+    
+    function insufficient(pos) { const rest = pos.b.filter((p) => p && p.toLowerCase() !== 'k'); if (rest.length === 0) return true; return rest.length === 1 && 'nb'.includes(rest[0].toLowerCase()); }
+    
+    return { startPos, legal, make, inCheck, key, insufficient };
+})();
+
+// ============================================================
 // КОНСТАНТЫ
 // ============================================================
 const MATCHMAKING_TIMEOUT = 30 * 1000;       // 30 сек ожидания соперника
@@ -157,10 +255,12 @@ const REPEAT_LIMIT = 3;                      // троекратное повт�
 // ХРАНИЛИЩА
 // ============================================================
 const matches = {};
-const leaderboards = {
-    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: []
-};
+const chessMatches = {};
 const matchmakingQueue = [];
+const chessQueue = [];
+const leaderboards = {
+    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
+};
 
 // ============================================================
 // УТИЛИТЫ
@@ -189,60 +289,72 @@ function checkDraw(match) {
     return null;
 }
 
+function checkChessDraw(match) {
+    const pos = match.gameState;
+    
+    if (pos.hm >= 100) return 'fifty';
+    if (CH.insufficient(pos)) return 'material';
+    
+    const key = CH.key(pos);
+    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'repeat';
+    
+    return null;
+}
+
 // ============================================================
 // ФОНОВАЯ ОЧИСТКА
 // ============================================================
 setInterval(() => {
     const now = nowMs();
 
+    // Очистка шашек
     for (const id of Object.keys(matches)) {
         const m = matches[id];
-
         if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
-            delete matches[id];
-            continue;
+            delete matches[id]; continue;
         }
-
         if (m.status === 'playing') {
             const seenA = m.lastSeen[m.players[0].id] || 0;
             const seenB = m.lastSeen[m.players[1].id] || 0;
-            const maxIdle = Math.max(now - seenA, now - seenB);
-            if (maxIdle > ABANDONED_MATCH_TTL) {
-                delete matches[id];
-            }
+            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete matches[id];
         }
     }
-
     for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
-        if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) {
-            matchmakingQueue.splice(i, 1);
+        if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
+    }
+
+    // Очистка шахмат
+    for (const id of Object.keys(chessMatches)) {
+        const m = chessMatches[id];
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
+            delete chessMatches[id]; continue;
         }
+        if (m.status === 'playing') {
+            const seenA = m.lastSeen[m.players[0].id] || 0;
+            const seenB = m.lastSeen[m.players[1].id] || 0;
+            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete chessMatches[id];
+        }
+    }
+    for (let i = chessQueue.length - 1; i >= 0; i--) {
+        if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
     }
 }, 30 * 1000);
 
 // ============================================================
-// РОУТЫ
+// API ШАШКИ ОНЛАЙН
 // ============================================================
-
 app.post('/api/checkers/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
 
-    // Уже в очереди?
-    if (matchmakingQueue.find(p => p.id === playerId)) {
-        return res.json({ success: true, status: 'waiting' });
-    }
+    if (matchmakingQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
-    // Уже в активном матче? — вернём его
-    const activeMatch = Object.values(matches).find(m =>
-        m.status === 'playing' && m.players.some(p => p.id === playerId)
-    );
+    const activeMatch = Object.values(matches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
     if (activeMatch) {
         activeMatch.lastSeen[playerId] = nowMs();
         return res.json({ success: true, matchId: activeMatch.id });
     }
 
-    // Есть ожидающий? — создаём матч
     if (matchmakingQueue.length > 0) {
         const opponent = matchmakingQueue.shift();
         const matchId = crypto.randomUUID();
@@ -262,29 +374,19 @@ app.post('/api/checkers/find-match', (req, res) => {
             createdAt: now,
             finishedAt: null,
             history: [posKey(startState)],
-            lastSeen: {
-                [opponent.id]: now,
-                [playerId]: now
-            }
+            lastSeen: { [opponent.id]: now, [playerId]: now }
         };
         return res.json({ success: true, matchId });
     }
 
-    // Никого нет — в очередь
     matchmakingQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
     return res.json({ success: true, status: 'waiting' });
 });
 
 app.get('/api/checkers/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
-
-    const match = Object.values(matches).find(m =>
-        m.status === 'playing' && m.players.some(p => p.id === playerId)
-    );
-    if (match) {
-        match.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, matchId: match.id });
-    }
+    const match = Object.values(matches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
+    if (match) { match.lastSeen[playerId] = nowMs(); return res.json({ success: true, matchId: match.id }); }
 
     const inQueue = matchmakingQueue.find(p => p.id === playerId);
     if (inQueue) {
@@ -296,7 +398,6 @@ app.get('/api/checkers/status/:playerId', (req, res) => {
         }
         return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
     }
-
     return res.json({ success: true, status: 'none' });
 });
 
@@ -307,19 +408,11 @@ app.get('/api/checkers/match/:id', (req, res) => {
     const playerId = req.query.playerId;
     if (playerId && match.lastSeen[playerId] !== undefined) {
         match.lastSeen[playerId] = nowMs();
-
-        // Проверка на отключение соперника
         if (match.status === 'playing') {
             const opponent = match.players.find(p => p.id !== playerId);
-            if (opponent) {
-                const oppLastSeen = match.lastSeen[opponent.id] || 0;
-                if (nowMs() - oppLastSeen > DISCONNECT_TIMEOUT) {
-                    finishMatch(match, playerId, 'disconnect');
-                }
-            }
+            if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) finishMatch(match, playerId, 'disconnect');
         }
     }
-
     res.json({ success: true, match });
 });
 
@@ -333,9 +426,7 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
     const player = match.players.find(p => p.id === playerId);
     if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
     if (player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
-    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') {
-        return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
-    }
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
 
     match.lastSeen[playerId] = nowMs();
 
@@ -353,7 +444,6 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
         const drawReason = checkDraw(match);
         if (drawReason) finishMatch(match, null, drawReason);
     }
-
     res.json({ success: true, match });
 });
 
@@ -362,7 +452,7 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
     const match = matches[req.params.id];
 
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (match.status !== 'playing') return res.json({ success: true, match }); // уже завершён
+    if (match.status !== 'playing') return res.json({ success: true, match });
 
     const player = match.players.find(p => p.id === playerId);
     if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
@@ -370,7 +460,130 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
     const opponent = match.players.find(p => p.id !== playerId);
     finishMatch(match, opponent ? opponent.id : null, 'surrender');
     match.lastSeen[playerId] = nowMs();
+    res.json({ success: true, match });
+});
 
+// ============================================================
+// API ШАХМАТЫ ОНЛАЙН
+// ============================================================
+app.post('/api/chess/find-match', (req, res) => {
+    const { playerId, nickname } = req.body;
+    if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
+
+    if (chessQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
+
+    const activeMatch = Object.values(chessMatches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
+    if (activeMatch) {
+        activeMatch.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, matchId: activeMatch.id });
+    }
+
+    if (chessQueue.length > 0) {
+        const opponent = chessQueue.shift();
+        const matchId = crypto.randomUUID();
+        const now = nowMs();
+        const startState = CH.startPos();
+
+        chessMatches[matchId] = {
+            id: matchId,
+            players: [
+                { id: opponent.id, nickname: opponent.nickname, color: 'w' },
+                { id: playerId, nickname: nickname || 'Игрок', color: 'b' }
+            ],
+            status: 'playing',
+            gameState: startState,
+            winner: null,
+            endReason: null,
+            createdAt: now,
+            finishedAt: null,
+            history: [CH.key(startState)],
+            lastSeen: { [opponent.id]: now, [playerId]: now }
+        };
+        return res.json({ success: true, matchId });
+    }
+
+    chessQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
+    return res.json({ success: true, status: 'waiting' });
+});
+
+app.get('/api/chess/status/:playerId', (req, res) => {
+    const playerId = req.params.playerId;
+    const match = Object.values(chessMatches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
+    if (match) { match.lastSeen[playerId] = nowMs(); return res.json({ success: true, matchId: match.id }); }
+
+    const inQueue = chessQueue.find(p => p.id === playerId);
+    if (inQueue) {
+        const waitTime = nowMs() - inQueue.timestamp;
+        if (waitTime > MATCHMAKING_TIMEOUT) {
+            const idx = chessQueue.findIndex(p => p.id === playerId);
+            if (idx !== -1) chessQueue.splice(idx, 1);
+            return res.json({ success: true, status: 'timeout' });
+        }
+        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
+    }
+    return res.json({ success: true, status: 'none' });
+});
+
+app.get('/api/chess/match/:id', (req, res) => {
+    const match = chessMatches[req.params.id];
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+
+    const playerId = req.query.playerId;
+    if (playerId && match.lastSeen[playerId] !== undefined) {
+        match.lastSeen[playerId] = nowMs();
+        if (match.status === 'playing') {
+            const opponent = match.players.find(p => p.id !== playerId);
+            if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) finishMatch(match, playerId, 'disconnect');
+        }
+    }
+    res.json({ success: true, match });
+});
+
+app.post('/api/chess/match/:id/move', (req, res) => {
+    const { playerId, move } = req.body;
+    const match = chessMatches[req.params.id];
+
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+    if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
+
+    const player = match.players.find(p => p.id === playerId);
+    if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
+    if (player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
+
+    match.lastSeen[playerId] = nowMs();
+
+    const validMoves = CH.legal(match.gameState);
+    const realMove = validMoves.find(m => m.from === move.from && m.to === move.to && (!m.promo || m.promo === move.promo));
+    if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
+
+    match.gameState = CH.make(match.gameState, realMove);
+    match.history.push(CH.key(match.gameState));
+
+    const nextMoves = CH.legal(match.gameState);
+    if (nextMoves.length === 0) {
+        const isCheck = CH.inCheck(match.gameState, match.gameState.turn);
+        finishMatch(match, isCheck ? playerId : null, isCheck ? 'checkmate' : 'stalemate');
+    } else {
+        const drawReason = checkChessDraw(match);
+        if (drawReason) finishMatch(match, null, drawReason);
+    }
+    res.json({ success: true, match });
+});
+
+app.post('/api/chess/match/:id/surrender', (req, res) => {
+    const { playerId } = req.body;
+    const match = chessMatches[req.params.id];
+
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+    if (match.status !== 'playing') return res.json({ success: true, match });
+
+    const player = match.players.find(p => p.id === playerId);
+    if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
+
+    const opponent = match.players.find(p => p.id !== playerId);
+    finishMatch(match, opponent ? opponent.id : null, 'surrender');
+    match.lastSeen[playerId] = nowMs();
     res.json({ success: true, match });
 });
 
@@ -384,7 +597,6 @@ app.post('/api/scores', (req, res) => {
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
 
-    // Ищем, есть ли уже этот игрок в таблице (чтобы обновлять его рекорд, а не спамить)
     let existing = leaderboards[gameId].find(x => x.nickname === nickname);
     
     if (existing) {
@@ -396,13 +608,7 @@ app.post('/api/scores', (req, res) => {
         existing.losses = Math.max(existing.losses || 0, losses);
         existing.date = Date.now();
     } else {
-        leaderboards[gameId].push({ 
-            nickname: nickname || 'Игрок', 
-            score, 
-            losses, 
-            date: Date.now(), 
-            id: crypto.randomUUID() 
-        });
+        leaderboards[gameId].push({ nickname: nickname || 'Игрок', score, losses, date: Date.now(), id: crypto.randomUUID() });
     }
 
     leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
@@ -410,11 +616,12 @@ app.post('/api/scores', (req, res) => {
 
     res.json({ success: true });
 });
+
 app.get('/api/scores/:gameId', (req, res) => {
     const scores = leaderboards[req.params.gameId] || [];
     res.json({ success: true, scores });
 });
 
-app.get('/', (req, res) => res.send('Legion Arcade Checkers Server 🐾'));
+app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
 app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
