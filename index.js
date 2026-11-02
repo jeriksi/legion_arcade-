@@ -157,6 +157,9 @@ const REPEAT_LIMIT = 3;                      // троекратное повт�
 // ХРАНИЛИЩА
 // ============================================================
 const matches = {};
+const leaderboards = {
+    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: []
+};
 const matchmakingQueue = [];
 
 // ============================================================
@@ -369,6 +372,31 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
     match.lastSeen[playerId] = nowMs();
 
     res.json({ success: true, match });
+});
+
+// ============================================================
+// ЛИДЕРБОРД
+// ============================================================
+app.post('/api/scores', (req, res) => {
+    const { gameId, nickname, score, lowerIsBetter } = req.body;
+    if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
+    if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
+
+    if (!leaderboards[gameId]) leaderboards[gameId] = [];
+
+    const entry = { nickname: nickname || 'Игрок', score, date: Date.now(), id: crypto.randomUUID() };
+    leaderboards[gameId].push(entry);
+
+    // Сортируем: если lowerIsBetter (время в сапере) - по возрастанию, иначе по убыванию
+    leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
+    leaderboards[gameId] = leaderboards[gameId].slice(0, 10); // Оставляем только Топ-10
+
+    res.json({ success: true, rank: leaderboards[gameId].findIndex(x => x.id === entry.id) + 1 });
+});
+
+app.get('/api/scores/:gameId', (req, res) => {
+    const scores = leaderboards[req.params.gameId] || [];
+    res.json({ success: true, scores });
 });
 
 app.get('/', (req, res) => res.send('Legion Arcade Checkers Server 🐾'));
