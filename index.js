@@ -1,15 +1,13 @@
 const express = require('express');
 const crypto = require('crypto');
-const app = express();
-const PORT = process.env.PORT || 3000;
-
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-
-const pongRooms = {}; 
 
 app.use(express.json());
 app.use((req, res, next) => {
@@ -21,7 +19,64 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ДВИЖОК ШАШЕК (русские шашки)
+// КОНСТАНТЫ
+// ============================================================
+const MATCHMAKING_TIMEOUT = 30 * 1000;
+const DISCONNECT_TIMEOUT = 60 * 1000;
+const FINISHED_MATCH_TTL = 10 * 60 * 1000;
+const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
+const DRAW_HM_LIMIT = 30;
+const REPEAT_LIMIT = 3;
+
+// ============================================================
+// ХРАНИЛИЩА
+// ============================================================
+const matches = {};
+const chessMatches = {};
+const matchmakingQueue = [];
+const chessQueue = [];
+const pongRooms = {};
+const leaderboards = {
+    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
+};
+
+// ============================================================
+// УТИЛИТЫ
+// ============================================================
+const nowMs = () => Date.now();
+const posKey = (pos) => pos.b.join('') + '|' + pos.turn;
+
+function finishMatch(match, winner, reason) {
+    match.status = 'finished';
+    match.winner = winner;
+    match.endReason = reason;
+    match.finishedAt = nowMs();
+}
+
+function checkDraw(match) {
+    const pos = match.gameState;
+    const pieces = pos.b.filter(p => p).length;
+    if (pieces <= 6 && pos.hm >= DRAW_HM_LIMIT) return 'draw-15';
+    const key = posKey(pos);
+    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'draw-repeat';
+    return null;
+}
+
+function checkChessDraw(match) {
+    const pos = match.gameState;
+    if (pos.hm >= 100) return 'fifty';
+    if (CH.insufficient(pos)) return 'material';
+    const key = CH.key(pos);
+    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'repeat';
+    return null;
+}
+
+function resetBall(room) {
+    room.ball = { x: 200, y: 150, vx: Math.random() > 0.5 ? 5 : -5, vy: (Math.random() - 0.5) * 6 };
+}
+
+// ============================================================
+// ДВИЖОК ШАШЕК
 // ============================================================
 const CK = (() => {
     const DIRS = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
@@ -243,7 +298,6 @@ const CH = (() => {
     }
     
     const key = (pos) => pos.b.map((p) => p || '.').join('') + pos.turn + (pos.c.K ? 'K' : '') + (pos.c.Q ? 'Q' : '') + (pos.c.k ? 'k' : '') + (pos.c.q ? 'q' : '') + pos.ep;
-    
     function insufficient(pos) { const rest = pos.b.filter((p) => p && p.toLowerCase() !== 'k'); if (rest.length === 0) return true; return rest.length === 1 && 'nb'.includes(rest[0].toLowerCase()); }
     
     return { startPos, legal, make, inCheck, key, insufficient };
@@ -258,7 +312,6 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
             
             if (data.type === 'join') {
-                // Ищем свободную комнату
                 let roomId = Object.keys(pongRooms).find(id => pongRooms[id].players.length === 1);
                 
                 if (!roomId) {
@@ -268,19 +321,20 @@ wss.on('connection', (ws) => {
                         players: [],
                         ball: { x: 200, y: 150, vx: 5, vy: 3 },
                         score: { p1: 0, p2: 0 },
-                        state: 'waiting', // waiting, playing, finished
-                        lastTime: Date.now()
+                        state: 'waiting',
+                        lastTime: Date.now(),
+                        interval: null
                     };
                 }
 
                 const room = pongRooms[roomId];
-                const playerIndex = room.players.length; // 0 или 1
+                const playerIndex = room.players.length;
                 
                 room.players.push({
                     id: data.playerId,
                     nickname: data.nickname,
                     ws: ws,
-                    paddleY: 150, // Начальная позиция ракетки
+                    paddleY: 150,
                     index: playerIndex
                 });
 
@@ -291,29 +345,24 @@ wss.on('connection', (ws) => {
                     room.state = 'playing';
                     room.lastTime = Date.now();
                     
-                    // Запускаем игровой цикл для этой комнаты
                     room.interval = setInterval(() => {
                         if (room.state !== 'playing') return;
                         
                         const now = Date.now();
-                        const dt = (now - room.lastTime) / 16.66; // Нормализация к 60 fps
+                        const dt = (now - room.lastTime) / 16.66;
                         room.lastTime = now;
 
-                        // Физика мяча
                         room.ball.x += room.ball.vx * dt;
                         room.ball.y += room.ball.vy * dt;
 
-                        // Отбивание от стен
                         if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
                         if (room.ball.y >= 300 - 10) { room.ball.y = 300 - 10; room.ball.vy *= -1; }
 
-                        // Логика ракеток
                         const p1 = room.players[0];
                         const p2 = room.players[1];
                         const p1Y = p1.paddleY - 30;
                         const p2Y = p2.paddleY - 30;
 
-                        // Столкновение с ракеткой 1 (слева)
                         if (room.ball.x <= 8 && room.ball.x + 10 >= 0) {
                             if (room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
                                 room.ball.x = 8;
@@ -322,7 +371,6 @@ wss.on('connection', (ws) => {
                                 room.ball.vy = (hitPos - 0.5) * 10;
                             }
                         }
-                        // Столкновение с ракеткой 2 (справа)
                         if (room.ball.x + 10 >= 400 - 8) {
                             if (room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
                                 room.ball.x = 400 - 8 - 10;
@@ -332,11 +380,9 @@ wss.on('connection', (ws) => {
                             }
                         }
 
-                        // Ограничение скорости
                         room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
                         room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
-                        // Голы
                         if (room.ball.x < 0) {
                             room.score.p2++;
                             resetBall(room);
@@ -345,13 +391,11 @@ wss.on('connection', (ws) => {
                             resetBall(room);
                         }
 
-                        // Проверка на победу
                         if (room.score.p1 >= 7 || room.score.p2 >= 7) {
                             room.state = 'finished';
                             clearInterval(room.interval);
                         }
 
-                        // Отправляем состояние обоим игрокам
                         const stateToSend = JSON.stringify({
                             type: 'state',
                             ball: room.ball,
@@ -364,7 +408,7 @@ wss.on('connection', (ws) => {
                             if (p.ws.readyState === 1) p.ws.send(stateToSend);
                         });
 
-                    }, 1000 / 60); // 60 fps
+                    }, 1000 / 60);
                 }
 
                 ws.send(JSON.stringify({ 
@@ -390,7 +434,7 @@ wss.on('connection', (ws) => {
         const room = pongRooms[ws.roomId];
         if (room) {
             room.state = 'finished';
-            clearInterval(room.interval);
+            if (room.interval) clearInterval(room.interval);
             room.players.forEach(p => {
                 if (p.ws !== ws && p.ws.readyState === 1) {
                     p.ws.send(JSON.stringify({ type: 'opponent_left' }));
@@ -401,85 +445,15 @@ wss.on('connection', (ws) => {
     });
 });
 
-function resetBall(room) {
-    room.ball = { x: 200, y: 150, vx: Math.random() > 0.5 ? 5 : -5, vy: (Math.random() - 0.5) * 6 };
-}
-
-// МЕНЯЕМ app.listen НА server.listen
-server.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
-
-// ============================================================
-// КОНСТАНТЫ
-// ============================================================
-const MATCHMAKING_TIMEOUT = 30 * 1000;       // 30 сек ожидания соперника
-const DISCONNECT_TIMEOUT = 60 * 1000;        // 60 сек без поллинга = отключился
-const FINISHED_MATCH_TTL = 10 * 60 * 1000;   // 10 минут хранения завершённых
-const ABANDONED_MATCH_TTL = 5 * 60 * 1000;   // 5 минут неактивности обоих = удалить
-const DRAW_HM_LIMIT = 30;                    // 15 полных ходов без боя/простых
-const REPEAT_LIMIT = 3;                      // троекратное повторение
-
-// ============================================================
-// ХРАНИЛИЩА
-// ============================================================
-const matches = {};
-const chessMatches = {};
-const matchmakingQueue = [];
-const chessQueue = [];
-const leaderboards = {
-    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
-};
-
-// ============================================================
-// УТИЛИТЫ
-// ============================================================
-const nowMs = () => Date.now();
-const posKey = (pos) => pos.b.join('') + '|' + pos.turn;
-
-function finishMatch(match, winner, reason) {
-    match.status = 'finished';
-    match.winner = winner;
-    match.endReason = reason;
-    match.finishedAt = nowMs();
-}
-
-function checkDraw(match) {
-    const pos = match.gameState;
-    const pieces = pos.b.filter(p => p).length;
-
-    // Правило 15 ходов применяется только при ≤6 фигурах на доске
-    if (pieces <= 6 && pos.hm >= DRAW_HM_LIMIT) return 'draw-15';
-
-    // Троекратное повторение позиции
-    const key = posKey(pos);
-    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'draw-repeat';
-
-    return null;
-}
-
-function checkChessDraw(match) {
-    const pos = match.gameState;
-    
-    if (pos.hm >= 100) return 'fifty';
-    if (CH.insufficient(pos)) return 'material';
-    
-    const key = CH.key(pos);
-    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'repeat';
-    
-    return null;
-}
-
 // ============================================================
 // ФОНОВАЯ ОЧИСТКА
 // ============================================================
 setInterval(() => {
     const now = nowMs();
 
-    // Очистка шашек
     for (const id of Object.keys(matches)) {
         const m = matches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
-            delete matches[id]; continue;
-        }
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete matches[id]; continue; }
         if (m.status === 'playing') {
             const seenA = m.lastSeen[m.players[0].id] || 0;
             const seenB = m.lastSeen[m.players[1].id] || 0;
@@ -490,12 +464,9 @@ setInterval(() => {
         if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
     }
 
-    // Очистка шахмат
     for (const id of Object.keys(chessMatches)) {
         const m = chessMatches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
-            delete chessMatches[id]; continue;
-        }
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete chessMatches[id]; continue; }
         if (m.status === 'playing') {
             const seenA = m.lastSeen[m.players[0].id] || 0;
             const seenB = m.lastSeen[m.players[1].id] || 0;
@@ -513,7 +484,6 @@ setInterval(() => {
 app.post('/api/checkers/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
-
     if (matchmakingQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
     const activeMatch = Object.values(matches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
@@ -571,7 +541,6 @@ app.get('/api/checkers/status/:playerId', (req, res) => {
 app.get('/api/checkers/match/:id', (req, res) => {
     const match = matches[req.params.id];
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-
     const playerId = req.query.playerId;
     if (playerId && match.lastSeen[playerId] !== undefined) {
         match.lastSeen[playerId] = nowMs();
@@ -586,7 +555,6 @@ app.get('/api/checkers/match/:id', (req, res) => {
 app.post('/api/checkers/match/:id/move', (req, res) => {
     const { playerId, move } = req.body;
     const match = matches[req.params.id];
-
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
     if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
 
@@ -596,7 +564,6 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
     if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
 
     match.lastSeen[playerId] = nowMs();
-
     const validMoves = CK.legal(match.gameState);
     const realMove = validMoves.find(m => m.from === move.from && m.to === move.to);
     if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
@@ -617,7 +584,6 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
 app.post('/api/checkers/match/:id/surrender', (req, res) => {
     const { playerId } = req.body;
     const match = matches[req.params.id];
-
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
     if (match.status !== 'playing') return res.json({ success: true, match });
 
@@ -636,7 +602,6 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
 app.post('/api/chess/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
-
     if (chessQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
     const activeMatch = Object.values(chessMatches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
@@ -694,7 +659,6 @@ app.get('/api/chess/status/:playerId', (req, res) => {
 app.get('/api/chess/match/:id', (req, res) => {
     const match = chessMatches[req.params.id];
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-
     const playerId = req.query.playerId;
     if (playerId && match.lastSeen[playerId] !== undefined) {
         match.lastSeen[playerId] = nowMs();
@@ -709,7 +673,6 @@ app.get('/api/chess/match/:id', (req, res) => {
 app.post('/api/chess/match/:id/move', (req, res) => {
     const { playerId, move } = req.body;
     const match = chessMatches[req.params.id];
-
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
     if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
 
@@ -719,7 +682,6 @@ app.post('/api/chess/match/:id/move', (req, res) => {
     if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
 
     match.lastSeen[playerId] = nowMs();
-
     const validMoves = CH.legal(match.gameState);
     const realMove = validMoves.find(m => m.from === move.from && m.to === move.to && (!m.promo || m.promo === move.promo));
     if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
@@ -741,7 +703,6 @@ app.post('/api/chess/match/:id/move', (req, res) => {
 app.post('/api/chess/match/:id/surrender', (req, res) => {
     const { playerId } = req.body;
     const match = chessMatches[req.params.id];
-
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
     if (match.status !== 'playing') return res.json({ success: true, match });
 
@@ -763,7 +724,6 @@ app.post('/api/scores', (req, res) => {
     if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
-
     let existing = leaderboards[gameId].find(x => x.nickname === nickname);
     
     if (existing) {
@@ -780,7 +740,6 @@ app.post('/api/scores', (req, res) => {
 
     leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
     leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
-
     res.json({ success: true });
 });
 
@@ -791,4 +750,7 @@ app.get('/api/scores/:gameId', (req, res) => {
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
-app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
+// ============================================================
+// ЗАПУСК СЕРВЕРА
+// ============================================================
+server.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
