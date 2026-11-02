@@ -1,13 +1,8 @@
 const express = require('express');
 const crypto = require('crypto');
-const http = require('http');
-const { WebSocketServer } = require('ws');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
 
 app.use(express.json());
 app.use((req, res, next) => {
@@ -36,6 +31,7 @@ const chessMatches = {};
 const matchmakingQueue = [];
 const chessQueue = [];
 const pongRooms = {};
+const pongQueue = [];      // очередь поиска для Pong
 const leaderboards = {
     mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
 };
@@ -216,7 +212,7 @@ const CH = (() => {
     const KG = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
     const DIAG = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
     const ORTH = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-    
+
     function fromFEN(fen) {
         const parts = fen.split(' '); const b = [];
         for (const ch of parts[0]) {
@@ -228,7 +224,7 @@ const CH = (() => {
         return { b, turn: parts[1] || 'w', c: { K: cast.includes('K'), Q: cast.includes('Q'), k: cast.includes('k'), q: cast.includes('q') }, ep: ep === '-' ? -1 : (8 - Number(ep[1])) * 8 + (ep.charCodeAt(0) - 97), hm: Number(parts[4]) || 0 };
     }
     const startPos = () => fromFEN('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
-    
+
     function attacked(pos, sq, by) {
         const b = pos.b, r = sq >> 3, c = sq & 7, pr = by === 'w' ? r + 1 : r - 1;
         if (pr >= 0 && pr < 8) { const P = by === 'w' ? 'P' : 'p'; if (c > 0 && b[pr * 8 + c - 1] === P) return true; if (c < 7 && b[pr * 8 + c + 1] === P) return true; }
@@ -240,9 +236,9 @@ const CH = (() => {
         for (const [dr, dc] of ORTH) { let rr = r + dr, cc = c + dc; while (rr >= 0 && rr < 8 && cc >= 0 && cc < 8) { const p = b[rr * 8 + cc]; if (p) { if (p === R || p === Q) return true; break; } rr += dr; cc += dc; } }
         return false;
     }
-    
+
     function inCheck(pos, color) { const k = pos.b.indexOf(color === 'w' ? 'K' : 'k'); return k >= 0 && attacked(pos, k, color === 'w' ? 'b' : 'w'); }
-    
+
     function make(pos, m) {
         const b = pos.b.slice(), me = pos.turn, p = b[m.from], cap = b[m.to];
         b[m.to] = m.promo ? (me === 'w' ? m.promo.toUpperCase() : m.promo.toLowerCase()) : p; b[m.from] = null;
@@ -255,7 +251,7 @@ const CH = (() => {
         const pawn = p === 'P' || p === 'p';
         return { b, turn: me === 'w' ? 'b' : 'w', c, ep: m.flag === 'dbl' ? (m.from + m.to) / 2 : -1, hm: (pawn || cap || m.flag === 'ep') ? 0 : pos.hm + 1 };
     }
-    
+
     function legal(pos) {
         const me = pos.turn, opp = me === 'w' ? 'b' : 'w', b = pos.b, out = [];
         const add = (from, to, flag, promo) => out.push({ from, to, flag, promo });
@@ -296,32 +292,35 @@ const CH = (() => {
         }
         return out.filter((m) => !inCheck(make(pos, m), me));
     }
-    
+
     const key = (pos) => pos.b.map((p) => p || '.').join('') + pos.turn + (pos.c.K ? 'K' : '') + (pos.c.Q ? 'Q' : '') + (pos.c.k ? 'k' : '') + (pos.c.q ? 'q' : '') + pos.ep;
     function insufficient(pos) { const rest = pos.b.filter((p) => p && p.toLowerCase() !== 'k'); if (rest.length === 0) return true; return rest.length === 1 && 'nb'.includes(rest[0].toLowerCase()); }
-    
+
     return { startPos, legal, make, inCheck, key, insufficient };
 })();
 
 // ============================================================
 // API ПИНГ-ПОНГ ОНЛАЙН (HTTP Polling)
 // ============================================================
-const pongQueue = [];
-
-// 1. Поиск соперника
 app.post('/api/pong/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
 
+    // Уже в активной игре?
     const activeRoom = Object.values(pongRooms).find(r =>
         r.state === 'playing' && r.players.some(p => p.id === playerId));
-    if (activeRoom) return res.json({ success: true, roomId: activeRoom.id });
+    if (activeRoom) {
+        if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, roomId: activeRoom.id });
+    }
 
+    // Уже в очереди?
     if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
     if (pongQueue.length > 0) {
         const opponent = pongQueue.shift();
         const roomId = crypto.randomUUID();
+        const ts = nowMs();
         pongRooms[roomId] = {
             id: roomId,
             players: [
@@ -331,49 +330,67 @@ app.post('/api/pong/find-match', (req, res) => {
             ball: { x: 200, y: 150, vx: 5, vy: 3 },
             score: { p1: 0, p2: 0 },
             state: 'playing',
-            lastTick: nowMs()
+            lastTick: ts,
+            lastSeen: { [opponent.id]: ts, [playerId]: ts },
+            finishedAt: null
         };
         return res.json({ success: true, roomId });
     }
 
     pongQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
-    res.json({ success: true, status: 'waiting' });
+    return res.json({ success: true, status: 'waiting' });
 });
 
-// 2. Статус поиска
 app.get('/api/pong/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
     const room = Object.values(pongRooms).find(r => r.state === 'playing' && r.players.some(p => p.id === playerId));
-    if (room) return res.json({ success: true, roomId: room.id });
-    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
+    if (room) {
+        if (room.lastSeen) room.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, roomId: room.id });
+    }
+    const inQueue = pongQueue.find(p => p.id === playerId);
+    if (inQueue) {
+        const waitTime = nowMs() - inQueue.timestamp;
+        if (waitTime > MATCHMAKING_TIMEOUT) {
+            const idx = pongQueue.findIndex(p => p.id === playerId);
+            if (idx !== -1) pongQueue.splice(idx, 1);
+            return res.json({ success: true, status: 'timeout' });
+        }
+        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
+    }
     return res.json({ success: true, status: 'none' });
 });
 
-// 3. Получение состояния (вызывается часто)
 app.get('/api/pong/room/:roomId', (req, res) => {
     const room = pongRooms[req.params.roomId];
-    if (!room) return res.status(404).json({ success: false });
+    if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
 
+    const playerId = req.query.playerId;
+    if (playerId && room.lastSeen) room.lastSeen[playerId] = nowMs();
+
+    // Физика (только пока идёт игра)
     if (room.state === 'playing') {
         const now = nowMs();
         const dt = Math.min((now - room.lastTick) / 16.66, 3); // ограничение на лаг
         room.lastTick = now;
 
-        // Физика мяча
         room.ball.x += room.ball.vx * dt;
         room.ball.y += room.ball.vy * dt;
 
+        // Отскоки от верх/низ
         if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
         if (room.ball.y >= 290) { room.ball.y = 290; room.ball.vy *= -1; }
 
         const p1 = room.players[0], p2 = room.players[1];
         const p1Y = p1.paddleY - 30, p2Y = p2.paddleY - 30;
 
+        // Левая ракетка
         if (room.ball.x <= 8 && room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
             room.ball.x = 8;
             room.ball.vx = Math.abs(room.ball.vx) * 1.05;
             room.ball.vy = ((room.ball.y - p1Y) / 60 - 0.5) * 10;
         }
+        // Правая ракетка
         if (room.ball.x + 10 >= 392 && room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
             room.ball.x = 392 - 10;
             room.ball.vx = -Math.abs(room.ball.vx) * 1.05;
@@ -383,11 +400,13 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
         room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
+        // Голы
         if (room.ball.x < 0) { room.score.p2++; resetBall(room); }
         else if (room.ball.x > 400) { room.score.p1++; resetBall(room); }
 
         if (room.score.p1 >= 7 || room.score.p2 >= 7) {
             room.state = 'finished';
+            room.finishedAt = nowMs();
         }
     }
 
@@ -395,7 +414,7 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         success: true,
         state: {
             ball: { x: room.ball.x, y: room.ball.y },
-            score: room.score,
+            score: { p1: room.score.p1, p2: room.score.p2 },
             p1Y: room.players[0].paddleY,
             p2Y: room.players[1].paddleY,
             state: room.state,
@@ -404,21 +423,24 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     });
 });
 
-// 4. Отправка позиции ракетки
 app.post('/api/pong/room/:roomId/move', (req, res) => {
     const { playerId, y } = req.body;
     const room = pongRooms[req.params.roomId];
-    if (!room) return res.status(404).json({ success: false });
+    if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
     const player = room.players.find(p => p.id === playerId);
-    if (!player) return res.status(400).json({ success: false });
+    if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
+
+    if (room.lastSeen) room.lastSeen[playerId] = nowMs();
     player.paddleY = Math.max(30, Math.min(270, y));
     res.json({ success: true });
 });
 
-// 5. Выход из игры
 app.post('/api/pong/room/:roomId/leave', (req, res) => {
     const room = pongRooms[req.params.roomId];
-    if (room) { room.state = 'finished'; }
+    if (room && room.state === 'playing') {
+        room.state = 'finished';
+        room.finishedAt = nowMs();
+    }
     res.json({ success: true });
 });
 
@@ -428,9 +450,12 @@ app.post('/api/pong/room/:roomId/leave', (req, res) => {
 setInterval(() => {
     const now = nowMs();
 
+    // --- ШАШКИ ОНЛАЙН ---
     for (const id of Object.keys(matches)) {
         const m = matches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete matches[id]; continue; }
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
+            delete matches[id]; continue;
+        }
         if (m.status === 'playing') {
             const seenA = m.lastSeen[m.players[0].id] || 0;
             const seenB = m.lastSeen[m.players[1].id] || 0;
@@ -441,9 +466,12 @@ setInterval(() => {
         if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
     }
 
+    // --- ШАХМАТЫ ОНЛАЙН ---
     for (const id of Object.keys(chessMatches)) {
         const m = chessMatches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete chessMatches[id]; continue; }
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
+            delete chessMatches[id]; continue;
+        }
         if (m.status === 'playing') {
             const seenA = m.lastSeen[m.players[0].id] || 0;
             const seenB = m.lastSeen[m.players[1].id] || 0;
@@ -452,6 +480,30 @@ setInterval(() => {
     }
     for (let i = chessQueue.length - 1; i >= 0; i--) {
         if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
+    }
+
+    // --- ПИНГ-ПОНГ ОНЛАЙН ---
+    for (const id of Object.keys(pongRooms)) {
+        const r = pongRooms[id];
+
+        // Завершённые комнаты — удаляем по TTL
+        if (r.state === 'finished') {
+            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) {
+                delete pongRooms[id];
+            }
+            continue;
+        }
+
+        // Активные — если ОБА игрока молчат, комната брошена
+        if (r.state === 'playing' && r.players.length === 2) {
+            const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
+            const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
+            const bothStale = (now - seenA > DISCONNECT_TIMEOUT) && (now - seenB > DISCONNECT_TIMEOUT);
+            if (bothStale) delete pongRooms[id];
+        }
+    }
+    for (let i = pongQueue.length - 1; i >= 0; i--) {
+        if (now - pongQueue[i].timestamp > MATCHMAKING_TIMEOUT) pongQueue.splice(i, 1);
     }
 }, 30 * 1000);
 
@@ -702,7 +754,7 @@ app.post('/api/scores', (req, res) => {
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     let existing = leaderboards[gameId].find(x => x.nickname === nickname);
-    
+
     if (existing) {
         if (lowerIsBetter) {
             if (score < existing.score) existing.score = score;
@@ -730,4 +782,4 @@ app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 // ============================================================
 // ЗАПУСК СЕРВЕРА
 // ============================================================
-server.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
+app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
