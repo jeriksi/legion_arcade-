@@ -304,145 +304,122 @@ const CH = (() => {
 })();
 
 // ============================================================
-// WEBSOCKET: ПОНГ ОНЛАЙН
+// API ПИНГ-ПОНГ ОНЛАЙН (HTTP Polling)
 // ============================================================
-wss.on('connection', (ws) => {
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            
-            if (data.type === 'join') {
-                let roomId = Object.keys(pongRooms).find(id => pongRooms[id].players.length === 1);
-                
-                if (!roomId) {
-                    roomId = crypto.randomUUID();
-                    pongRooms[roomId] = {
-                        id: roomId,
-                        players: [],
-                        ball: { x: 200, y: 150, vx: 5, vy: 3 },
-                        score: { p1: 0, p2: 0 },
-                        state: 'waiting',
-                        lastTime: Date.now(),
-                        interval: null
-                    };
-                }
+const pongQueue = [];
 
-                const room = pongRooms[roomId];
-                const playerIndex = room.players.length;
-                
-                room.players.push({
-                    id: data.playerId,
-                    nickname: data.nickname,
-                    ws: ws,
-                    paddleY: 150,
-                    index: playerIndex
-                });
+// 1. Поиск соперника
+app.post('/api/pong/find-match', (req, res) => {
+    const { playerId, nickname } = req.body;
+    if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
 
-                ws.roomId = roomId;
-                ws.playerIndex = playerIndex;
+    const activeRoom = Object.values(pongRooms).find(r =>
+        r.state === 'playing' && r.players.some(p => p.id === playerId));
+    if (activeRoom) return res.json({ success: true, roomId: activeRoom.id });
 
-                if (room.players.length === 2) {
-                    room.state = 'playing';
-                    room.lastTime = Date.now();
-                    
-                    room.interval = setInterval(() => {
-                        if (room.state !== 'playing') return;
-                        
-                        const now = Date.now();
-                        const dt = (now - room.lastTime) / 16.66;
-                        room.lastTime = now;
+    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
-                        room.ball.x += room.ball.vx * dt;
-                        room.ball.y += room.ball.vy * dt;
+    if (pongQueue.length > 0) {
+        const opponent = pongQueue.shift();
+        const roomId = crypto.randomUUID();
+        pongRooms[roomId] = {
+            id: roomId,
+            players: [
+                { id: opponent.id, nickname: opponent.nickname, paddleY: 150, index: 0 },
+                { id: playerId, nickname: nickname || 'Игрок', paddleY: 150, index: 1 }
+            ],
+            ball: { x: 200, y: 150, vx: 5, vy: 3 },
+            score: { p1: 0, p2: 0 },
+            state: 'playing',
+            lastTick: nowMs()
+        };
+        return res.json({ success: true, roomId });
+    }
 
-                        if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
-                        if (room.ball.y >= 300 - 10) { room.ball.y = 300 - 10; room.ball.vy *= -1; }
+    pongQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
+    res.json({ success: true, status: 'waiting' });
+});
 
-                        const p1 = room.players[0];
-                        const p2 = room.players[1];
-                        const p1Y = p1.paddleY - 30;
-                        const p2Y = p2.paddleY - 30;
+// 2. Статус поиска
+app.get('/api/pong/status/:playerId', (req, res) => {
+    const playerId = req.params.playerId;
+    const room = Object.values(pongRooms).find(r => r.state === 'playing' && r.players.some(p => p.id === playerId));
+    if (room) return res.json({ success: true, roomId: room.id });
+    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
+    return res.json({ success: true, status: 'none' });
+});
 
-                        if (room.ball.x <= 8 && room.ball.x + 10 >= 0) {
-                            if (room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
-                                room.ball.x = 8;
-                                room.ball.vx *= -1.1;
-                                const hitPos = (room.ball.y - p1Y) / 60;
-                                room.ball.vy = (hitPos - 0.5) * 10;
-                            }
-                        }
-                        if (room.ball.x + 10 >= 400 - 8) {
-                            if (room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
-                                room.ball.x = 400 - 8 - 10;
-                                room.ball.vx *= -1.1;
-                                const hitPos = (room.ball.y - p2Y) / 60;
-                                room.ball.vy = (hitPos - 0.5) * 10;
-                            }
-                        }
+// 3. Получение состояния (вызывается часто)
+app.get('/api/pong/room/:roomId', (req, res) => {
+    const room = pongRooms[req.params.roomId];
+    if (!room) return res.status(404).json({ success: false });
 
-                        room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
-                        room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
+    if (room.state === 'playing') {
+        const now = nowMs();
+        const dt = Math.min((now - room.lastTick) / 16.66, 3); // ограничение на лаг
+        room.lastTick = now;
 
-                        if (room.ball.x < 0) {
-                            room.score.p2++;
-                            resetBall(room);
-                        } else if (room.ball.x > 400) {
-                            room.score.p1++;
-                            resetBall(room);
-                        }
+        // Физика мяча
+        room.ball.x += room.ball.vx * dt;
+        room.ball.y += room.ball.vy * dt;
 
-                        if (room.score.p1 >= 7 || room.score.p2 >= 7) {
-                            room.state = 'finished';
-                            clearInterval(room.interval);
-                        }
+        if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
+        if (room.ball.y >= 290) { room.ball.y = 290; room.ball.vy *= -1; }
 
-                        const stateToSend = JSON.stringify({
-                            type: 'state',
-                            ball: room.ball,
-                            score: room.score,
-                            p1Y: p1.paddleY,
-                            p2Y: p2.paddleY,
-                            state: room.state
-                        });
-                        room.players.forEach(p => {
-                            if (p.ws.readyState === 1) p.ws.send(stateToSend);
-                        });
+        const p1 = room.players[0], p2 = room.players[1];
+        const p1Y = p1.paddleY - 30, p2Y = p2.paddleY - 30;
 
-                    }, 1000 / 60);
-                }
+        if (room.ball.x <= 8 && room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
+            room.ball.x = 8;
+            room.ball.vx = Math.abs(room.ball.vx) * 1.05;
+            room.ball.vy = ((room.ball.y - p1Y) / 60 - 0.5) * 10;
+        }
+        if (room.ball.x + 10 >= 392 && room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
+            room.ball.x = 392 - 10;
+            room.ball.vx = -Math.abs(room.ball.vx) * 1.05;
+            room.ball.vy = ((room.ball.y - p2Y) / 60 - 0.5) * 10;
+        }
 
-                ws.send(JSON.stringify({ 
-                    type: 'joined', 
-                    roomId: roomId, 
-                    playerIndex: playerIndex,
-                    opponent: room.players.length === 2 ? (playerIndex === 0 ? room.players[1].nickname : room.players[0].nickname) : null
-                }));
-            }
+        room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
+        room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
-            if (data.type === 'move') {
-                const room = pongRooms[ws.roomId];
-                if (room && room.state === 'playing') {
-                    const player = room.players[ws.playerIndex];
-                    if (player) player.paddleY = data.y;
-                }
-            }
+        if (room.ball.x < 0) { room.score.p2++; resetBall(room); }
+        else if (room.ball.x > 400) { room.score.p1++; resetBall(room); }
 
-        } catch (e) { console.error('WS Error:', e); }
-    });
-
-    ws.on('close', () => {
-        const room = pongRooms[ws.roomId];
-        if (room) {
+        if (room.score.p1 >= 7 || room.score.p2 >= 7) {
             room.state = 'finished';
-            if (room.interval) clearInterval(room.interval);
-            room.players.forEach(p => {
-                if (p.ws !== ws && p.ws.readyState === 1) {
-                    p.ws.send(JSON.stringify({ type: 'opponent_left' }));
-                }
-            });
-            delete pongRooms[ws.roomId];
+        }
+    }
+
+    res.json({
+        success: true,
+        state: {
+            ball: { x: room.ball.x, y: room.ball.y },
+            score: room.score,
+            p1Y: room.players[0].paddleY,
+            p2Y: room.players[1].paddleY,
+            state: room.state,
+            timestamp: nowMs()
         }
     });
+});
+
+// 4. Отправка позиции ракетки
+app.post('/api/pong/room/:roomId/move', (req, res) => {
+    const { playerId, y } = req.body;
+    const room = pongRooms[req.params.roomId];
+    if (!room) return res.status(404).json({ success: false });
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return res.status(400).json({ success: false });
+    player.paddleY = Math.max(30, Math.min(270, y));
+    res.json({ success: true });
+});
+
+// 5. Выход из игры
+app.post('/api/pong/room/:roomId/leave', (req, res) => {
+    const room = pongRooms[req.params.roomId];
+    if (room) { room.state = 'finished'; }
+    res.json({ success: true });
 });
 
 // ============================================================
