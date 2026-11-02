@@ -8,19 +8,15 @@ app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-    
-    // (Убрал отсюда ошибочную ссылку на GitHub)
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-    }
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
 
 // ============================================================
-// ДВИЖОК ШАШЕК
+// ДВИЖОК ШАШЕК (русские шашки)
 // ============================================================
 const CK = (() => {
-    const DIRS = [[-1,-1],[-1,1],[1,-1],[1,1]];
+    const DIRS = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
     const colorOf = (p) => (!p ? null : (p === 'w' || p === 'W' ? 'w' : 'b'));
     const isKing = (p) => p === 'W' || p === 'B';
 
@@ -29,7 +25,8 @@ const CK = (() => {
         for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
             if (((r + c) & 1) === 0) continue;
             const i = r * 8 + c;
-            if (r < 3) b[i] = 'b'; else if (r > 4) b[i] = 'w';
+            if (r < 3) b[i] = 'b';
+            else if (r > 4) b[i] = 'w';
         }
         return { b, turn: 'w', hm: 0 };
     }
@@ -147,112 +144,233 @@ const CK = (() => {
 })();
 
 // ============================================================
+// КОНСТАНТЫ
+// ============================================================
+const MATCHMAKING_TIMEOUT = 30 * 1000;       // 30 сек ожидания соперника
+const DISCONNECT_TIMEOUT = 60 * 1000;        // 60 сек без поллинга = отключился
+const FINISHED_MATCH_TTL = 10 * 60 * 1000;   // 10 минут хранения завершённых
+const ABANDONED_MATCH_TTL = 5 * 60 * 1000;   // 5 минут неактивности обоих = удалить
+const DRAW_HM_LIMIT = 30;                    // 15 полных ходов без боя/простых
+const REPEAT_LIMIT = 3;                      // троекратное повторение
+
+// ============================================================
 // ХРАНИЛИЩА
 // ============================================================
-const matches = {}; 
-const matchmakingQueue = []; 
+const matches = {};
+const matchmakingQueue = [];
 
-// 1. Поиск матча (Авто-подбор)
-app.post('/api/checkers/find-match', (req, res) => {
-    const { playerId, nickname } = req.body;
-    
-    const existing = matchmakingQueue.find(p => p.id === playerId);
-    if (existing) {
-        return res.json({ success: true, status: 'waiting' });
-    }
-    
-    // Очистка старых заявок (если кто-то закрыл вкладку)
-    const now = Date.now();
-    for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
-        if (now - matchmakingQueue[i].timestamp > 30000) {
-            matchmakingQueue.splice(i, 1);
+// ============================================================
+// УТИЛИТЫ
+// ============================================================
+const nowMs = () => Date.now();
+const posKey = (pos) => pos.b.join('') + '|' + pos.turn;
+
+function finishMatch(match, winner, reason) {
+    match.status = 'finished';
+    match.winner = winner;
+    match.endReason = reason;
+    match.finishedAt = nowMs();
+}
+
+function checkDraw(match) {
+    const pos = match.gameState;
+    const pieces = pos.b.filter(p => p).length;
+
+    // Правило 15 ходов применяется только при ≤6 фигурах на доске
+    if (pieces <= 6 && pos.hm >= DRAW_HM_LIMIT) return 'draw-15';
+
+    // Троекратное повторение позиции
+    const key = posKey(pos);
+    if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'draw-repeat';
+
+    return null;
+}
+
+// ============================================================
+// ФОНОВАЯ ОЧИСТКА
+// ============================================================
+setInterval(() => {
+    const now = nowMs();
+
+    for (const id of Object.keys(matches)) {
+        const m = matches[id];
+
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
+            delete matches[id];
+            continue;
+        }
+
+        if (m.status === 'playing') {
+            const seenA = m.lastSeen[m.players[0].id] || 0;
+            const seenB = m.lastSeen[m.players[1].id] || 0;
+            const maxIdle = Math.max(now - seenA, now - seenB);
+            if (maxIdle > ABANDONED_MATCH_TTL) {
+                delete matches[id];
+            }
         }
     }
 
+    for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
+        if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) {
+            matchmakingQueue.splice(i, 1);
+        }
+    }
+}, 30 * 1000);
+
+// ============================================================
+// РОУТЫ
+// ============================================================
+
+app.post('/api/checkers/find-match', (req, res) => {
+    const { playerId, nickname } = req.body;
+    if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
+
+    // Уже в очереди?
+    if (matchmakingQueue.find(p => p.id === playerId)) {
+        return res.json({ success: true, status: 'waiting' });
+    }
+
+    // Уже в активном матче? — вернём его
+    const activeMatch = Object.values(matches).find(m =>
+        m.status === 'playing' && m.players.some(p => p.id === playerId)
+    );
+    if (activeMatch) {
+        activeMatch.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, matchId: activeMatch.id });
+    }
+
+    // Есть ожидающий? — создаём матч
     if (matchmakingQueue.length > 0) {
-        const opponent = matchmakingQueue.shift(); 
+        const opponent = matchmakingQueue.shift();
         const matchId = crypto.randomUUID();
-        
+        const now = nowMs();
+        const startState = CK.startPos();
+
         matches[matchId] = {
             id: matchId,
             players: [
                 { id: opponent.id, nickname: opponent.nickname, color: 'w' },
-                { id: playerId, nickname, color: 'b' }
+                { id: playerId, nickname: nickname || 'Игрок', color: 'b' }
             ],
             status: 'playing',
-            gameState: CK.startPos(),
-            winner: null
+            gameState: startState,
+            winner: null,
+            endReason: null,
+            createdAt: now,
+            finishedAt: null,
+            history: [posKey(startState)],
+            lastSeen: {
+                [opponent.id]: now,
+                [playerId]: now
+            }
         };
         return res.json({ success: true, matchId });
-    } else {
-        matchmakingQueue.push({ id: playerId, nickname, timestamp: Date.now() });
-        return res.json({ success: true, status: 'waiting' });
     }
+
+    // Никого нет — в очередь
+    matchmakingQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
+    return res.json({ success: true, status: 'waiting' });
 });
 
-// 2. Проверка статуса поиска
 app.get('/api/checkers/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
-    
-    const match = Object.values(matches).find(m => 
+
+    const match = Object.values(matches).find(m =>
         m.status === 'playing' && m.players.some(p => p.id === playerId)
     );
-    
     if (match) {
+        match.lastSeen[playerId] = nowMs();
         return res.json({ success: true, matchId: match.id });
     }
-    
+
     const inQueue = matchmakingQueue.find(p => p.id === playerId);
     if (inQueue) {
-        const waitTime = Date.now() - inQueue.timestamp;
-        
-        if (waitTime > 30000) {
+        const waitTime = nowMs() - inQueue.timestamp;
+        if (waitTime > MATCHMAKING_TIMEOUT) {
             const idx = matchmakingQueue.findIndex(p => p.id === playerId);
             if (idx !== -1) matchmakingQueue.splice(idx, 1);
             return res.json({ success: true, status: 'timeout' });
         }
-        
         return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
     }
-    
+
     return res.json({ success: true, status: 'none' });
 });
 
-// 3. Получить состояние матча
 app.get('/api/checkers/match/:id', (req, res) => {
     const match = matches[req.params.id];
-    if (!match) return res.status(404).json({ error: 'Матч не найден' });
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+
+    const playerId = req.query.playerId;
+    if (playerId && match.lastSeen[playerId] !== undefined) {
+        match.lastSeen[playerId] = nowMs();
+
+        // Проверка на отключение соперника
+        if (match.status === 'playing') {
+            const opponent = match.players.find(p => p.id !== playerId);
+            if (opponent) {
+                const oppLastSeen = match.lastSeen[opponent.id] || 0;
+                if (nowMs() - oppLastSeen > DISCONNECT_TIMEOUT) {
+                    finishMatch(match, playerId, 'disconnect');
+                }
+            }
+        }
+    }
+
     res.json({ success: true, match });
 });
 
-// 4. СДЕЛАТЬ ХОД (Этот кусок был потерян!)
 app.post('/api/checkers/match/:id/move', (req, res) => {
-    const { playerId, move } = req.body; 
+    const { playerId, move } = req.body;
     const match = matches[req.params.id];
-    
-    if (!match || match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра недоступна' });
-    
+
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+    if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
+
     const player = match.players.find(p => p.id === playerId);
-    if (!player || player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
-    
+    if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
+    if (player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') {
+        return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
+    }
+
+    match.lastSeen[playerId] = nowMs();
+
     const validMoves = CK.legal(match.gameState);
     const realMove = validMoves.find(m => m.from === move.from && m.to === move.to);
-    
     if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
-    
+
     match.gameState = CK.make(match.gameState, realMove);
-    
-    // Проверка: если у следующего игрока нет ходов, он проиграл
+    match.history.push(posKey(match.gameState));
+
     const nextMoves = CK.legal(match.gameState);
     if (nextMoves.length === 0) {
-        match.status = 'finished';
-        match.winner = playerId;
+        finishMatch(match, playerId, 'no-moves');
+    } else {
+        const drawReason = checkDraw(match);
+        if (drawReason) finishMatch(match, null, drawReason);
     }
-    
+
     res.json({ success: true, match });
 });
 
-// Тестовый роут
-app.get('/', (req, res) => res.send('Сервер шашек с авто-подбором работает! 🐾'));
+app.post('/api/checkers/match/:id/surrender', (req, res) => {
+    const { playerId } = req.body;
+    const match = matches[req.params.id];
+
+    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
+    if (match.status !== 'playing') return res.json({ success: true, match }); // уже завершён
+
+    const player = match.players.find(p => p.id === playerId);
+    if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
+
+    const opponent = match.players.find(p => p.id !== playerId);
+    finishMatch(match, opponent ? opponent.id : null, 'surrender');
+    match.lastSeen[playerId] = nowMs();
+
+    res.json({ success: true, match });
+});
+
+app.get('/', (req, res) => res.send('Legion Arcade Checkers Server 🐾'));
 
 app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
