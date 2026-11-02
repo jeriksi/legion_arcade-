@@ -8,7 +8,7 @@ app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-    
+    https://github.com/jeriksi/legion_arcade-/blob/main/index.js
     // Важно: браузер сначала шлет OPTIONS запрос для проверки CORS
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
@@ -147,79 +147,78 @@ const CK = (() => {
 })();
 
 // ============================================================
-// ХРАНИЛИЩЕ МАТЧЕЙ (В памяти сервера)
+// ХРАНИЛИЩА
 // ============================================================
-const matches = {}; // { matchId: { id, players: [], status, gameState, winner } }
+const matches = {}; 
+const matchmakingQueue = []; // <-- Очередь на подбор
 
-// 1. Создать матч (ожидание игрока)
-app.post('/api/checkers/create', (req, res) => {
+// 1. Поиск матча (Авто-подбор)
+app.post('/api/checkers/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
-    const matchId = crypto.randomUUID();
     
-    matches[matchId] = {
-        id: matchId,
-        players: [{ id: playerId, nickname, color: 'w' }],
-        status: 'waiting',
-        gameState: CK.startPos(),
-        winner: null
-    };
-    
-    res.json({ success: true, matchId });
-});
-
-// 2. Подключиться к существующему матчу
-app.post('/api/checkers/join', (req, res) => {
-    const { playerId, nickname, matchId } = req.body;
-    const match = matches[matchId];
-    
-    if (!match) return res.status(404).json({ error: 'Матч не найден' });
-    if (match.status !== 'waiting') return res.status(400).json({ error: 'Матч уже начался' });
-    if (match.players[0].id === playerId) return res.status(400).json({ error: 'Нельзя играть с самим собой' });
-    
-    match.players.push({ id: playerId, nickname, color: 'b' });
-    match.status = 'playing';
-    
-    res.json({ success: true, match });
-});
-
-// 3. Получить состояние матча (для опроса)
-app.get('/api/checkers/:id', (req, res) => {
-    const match = matches[req.params.id];
-    if (!match) return res.status(404).json({ error: 'Матч не найден' });
-    res.json({ success: true, match });
-});
-
-// 4. Сделать ход
-app.post('/api/checkers/:id/move', (req, res) => {
-    const { playerId, move } = req.body; // move: { from, to, captures, path, piece }
-    const match = matches[req.params.id];
-    
-    if (!match || match.status !== 'playing') return res.status(400).json({ error: 'Игра недоступна' });
-    
-    const player = match.players.find(p => p.id === playerId);
-    if (!player || player.color !== match.gameState.turn) return res.status(400).json({ error: 'Не ваш ход' });
-    
-    // Проверяем, легален ли ход на сервере (защита от читов)
-    const validMoves = CK.legal(match.gameState);
-    const isValid = validMoves.some(m => m.from === move.from && m.to === move.to);
-    
-    if (!isValid) return res.status(400).json({ error: 'Нелегальный ход' });
-    
-    // Применяем ход
-    const realMove = validMoves.find(m => m.from === move.from && m.to === move.to);
-    match.gameState = CK.make(match.gameState, realMove);
-    
-    // Проверка на конец игры (нет ходов)
-    const nextMoves = CK.legal(match.gameState);
-    if (nextMoves.length === 0) {
-        match.status = 'finished';
-        match.winner = playerId; // Победа тому, кто сделал ход
+    // Если игрок уже в очереди, просто обновляем его
+    const existing = matchmakingQueue.find(p => p.id === playerId);
+    if (existing) {
+        return res.json({ success: true, status: 'waiting' });
     }
     
-    res.json({ success: true, match });
+    if (matchmakingQueue.length > 0) {
+        // Нашли соперника в очереди!
+        const opponent = matchmakingQueue.shift(); // достаем первого из очереди
+        const matchId = crypto.randomUUID();
+        
+        matches[matchId] = {
+            id: matchId,
+            players: [
+                { id: opponent.id, nickname: opponent.nickname, color: 'w' },
+                { id: playerId, nickname, color: 'b' }
+            ],
+            status: 'playing',
+            gameState: CK.startPos(),
+            winner: null
+        };
+        return res.json({ success: true, matchId });
+    } else {
+        // Никого нет, встаем в очередь
+        matchmakingQueue.push({ id: playerId, nickname, timestamp: Date.now() });
+        return res.json({ success: true, status: 'waiting' });
+    }
 });
 
-// Тестовый роут
-app.get('/', (req, res) => res.send('Сервер шашек работает! 🐾'));
+// 2. Проверка статуса поиска (с таймером)
+app.get('/api/checkers/status/:playerId', (req, res) => {
+    const playerId = req.params.playerId;
+    
+    // Ищем активный матч
+    const match = Object.values(matches).find(m => 
+        m.status === 'playing' && m.players.some(p => p.id === playerId)
+    );
+    
+    if (match) {
+        return res.json({ success: true, matchId: match.id });
+    }
+    
+    // Проверяем очередь
+    const inQueue = matchmakingQueue.find(p => p.id === playerId);
+    if (inQueue) {
+        const waitTime = Date.now() - inQueue.timestamp;
+        
+        // Если прошло больше 30 секунд, отменяем поиск
+        if (waitTime > 30000) {
+            const idx = matchmakingQueue.findIndex(p => p.id === playerId);
+            if (idx !== -1) matchmakingQueue.splice(idx, 1);
+            return res.json({ success: true, status: 'timeout' });
+        }
+        
+        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
+    }
+    
+    return res.json({ success: true, status: 'none' });
+});
 
-app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
+// 3. Получить состояние матча
+app.get('/api/checkers/match/:id', (req, res) => {
+    const match = matches[req.params.id];
+    if (!match) return res.status(404).json({ error: 'Матч не найден' });
+    res.json({ success: true, match });
+});
