@@ -27,19 +27,14 @@ const SESSION_RATE_MAX = 20;
 // за половину лимита — чтобы не терять редких игроков без причины.
 const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 дней
 
-const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
-const PONG_START_COUNTDOWN = 3000;
-const PONG_GOAL_COUNTDOWN = 800;
-const PONG_MAX_STEP_MS = 4;
-const PONG_MAX_SUBSTEPS = 250;
-const PONG_HITBOX_PAD = 10;
-
 // ============================================================
 // БЕЛЫЙ СПИСОК ИГР
 // ============================================================
 // ВАЖНО: сервер валидирует только time-based sanity checks для соло-игр.
 // Мультиплеерные рекорды (checkers-mp, chess-mp) считаются ТОЛЬКО на сервере
 // в updateMultiplayerLeaderboard и через /api/scores от клиента НЕ принимаются.
+// Pong-мультиплеер полностью удалён с сервера. Сингл-плеерные pong_* оставлены
+// для тех клиентов, кто их ещё присылает в /api/scores.
 const GAME_RULES = {
     'mines_easy':    { lower: true,  maxScore: 3600,    minSeconds: 2 },
     'mines_mid':     { lower: true,  maxScore: 3600,    minSeconds: 2 },
@@ -99,23 +94,10 @@ const matches = {};
 const chessMatches = {};
 const matchmakingQueue = [];
 const chessQueue = [];
-const pongRooms = {};
-const pongQueue = [];
 
 const leaderboards = {};
 const gameSessions = new Map();         // sessionId -> { gameId, playerId, startTime }
 const playerGameSessions = new Map();   // `${playerId}:${gameId}` -> sessionId
-
-// Безопасный доступ к комнатам Pong — защищает от __proto__/constructor.
-// Без этой проверки pongRooms['__proto__'] возвращает Object.prototype,
-// проверка `if (!room)` его пропускает, и следующий room.players.find(...) падает.
-function getPongRoom(id) {
-    if (typeof id !== 'string') return null;
-    if (!Object.prototype.hasOwnProperty.call(pongRooms, id)) return null;
-    const room = pongRooms[id];
-    if (!room || !Array.isArray(room.players)) return null;
-    return room;
-}
 
 // ============================================================
 // АВТОРИЗАЦИЯ
@@ -179,9 +161,7 @@ setInterval(() => {
 
 app.use((req, res, next) => {
     const ip = getClientIp(req);
-    // Pong-клиент часто шлёт position ракетки — ему нужен высокий лимит.
-    const maxReq = req.path.startsWith('/api/pong/') ? 10000 : 150;
-    if (!checkRateLimit('ip:' + ip, maxReq, 60 * 1000)) {
+    if (!checkRateLimit('ip:' + ip, 150, 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много запросов. Подождите.' });
     }
     next();
@@ -529,10 +509,6 @@ function removeFromOtherQueues(playerId, keepQueue) {
         const i = chessQueue.findIndex(p => p.id === playerId);
         if (i !== -1) chessQueue.splice(i, 1);
     }
-    if (keepQueue !== 'pong') {
-        const i = pongQueue.findIndex(p => p.id === playerId);
-        if (i !== -1) pongQueue.splice(i, 1);
-    }
 }
 
 function checkDraw(match) {
@@ -551,17 +527,6 @@ function checkChessDraw(match) {
     const key = CH.key(pos);
     if (match.history.filter(k => k === key).length >= REPEAT_LIMIT) return 'repeat';
     return null;
-}
-
-function resetBall(room) {
-    room.ball = { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 };
-}
-
-function randomizePongVelocity(room) {
-    const dirX = Math.random() > 0.5 ? 1 : -1;
-    const dirY = Math.random() > 0.5 ? 1 : -1;
-    room.ball.vx = 4 * dirX;
-    room.ball.vy = 4 * dirY * (Math.random() * 0.5 + 0.5);
 }
 
 // ============================================================
@@ -824,6 +789,9 @@ app.post('/api/checkers/find-match', (req, res) => {
     return res.json({ success: true, status: 'waiting' });
 });
 
+// ============================================================
+// ШАХМАТЫ ОНЛАЙН
+// ============================================================
 app.post('/api/chess/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -871,231 +839,6 @@ app.post('/api/chess/find-match', (req, res) => {
 });
 
 // ============================================================
-// ПИНГ-ПОНГ ОНЛАЙН
-// ============================================================
-app.post('/api/pong/find-match', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-    const nickname = sanitizeNickname(req.body && req.body.nickname);
-    removeFromOtherQueues(playerId, 'pong');
-
-    const activeRoom = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
-    if (activeRoom) {
-        if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
-        const me = activeRoom.players.find(p => p.id === playerId);
-        return res.json({ success: true, roomId: activeRoom.id, playerIndex: me ? activeRoom.players.indexOf(me) : -1 });
-    }
-
-    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
-
-    if (pongQueue.length >= MAX_QUEUE) {
-        return res.status(503).json({ success: false, error: 'Очередь переполнена' });
-    }
-
-    if (pongQueue.length > 0) {
-        const opponent = pongQueue.shift();
-        const roomId = crypto.randomUUID();
-        const ts = nowMs();
-        pongRooms[roomId] = {
-            id: roomId,
-            players: [
-                { id: opponent.id, nickname: opponent.nickname, paddleY: PONG_H / 2, index: 0 },
-                { id: playerId, nickname, paddleY: PONG_H / 2, index: 1 }
-            ],
-            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 },
-            score: { p1: 0, p2: 0 },
-            state: 'countdown',
-            countdownEnd: ts + PONG_START_COUNTDOWN,
-            countdownIsInitial: true,
-            winner: null,
-            lastTick: ts,
-            lastSeen: { [opponent.id]: ts, [playerId]: ts },
-            finishedAt: null
-        };
-        return res.json({ success: true, roomId, playerIndex: 1 });
-    }
-
-    pongQueue.push({ id: playerId, nickname, timestamp: nowMs() });
-    return res.json({ success: true, status: 'waiting' });
-});
-
-app.get('/api/pong/status', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const room = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
-    if (room) {
-        if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-        const me = room.players.find(p => p.id === playerId);
-        return res.json({ success: true, roomId: room.id, playerIndex: me ? room.players.indexOf(me) : -1 });
-    }
-    const inQueue = pongQueue.find(p => p.id === playerId);
-    if (inQueue) {
-        const waitTime = nowMs() - inQueue.timestamp;
-        if (waitTime > MATCHMAKING_TIMEOUT) {
-            const idx = pongQueue.findIndex(p => p.id === playerId);
-            if (idx !== -1) pongQueue.splice(idx, 1);
-            return res.json({ success: true, status: 'timeout' });
-        }
-        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
-    }
-    return res.json({ success: true, status: 'none' });
-});
-
-app.get('/api/pong/room/:roomId', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const room = getPongRoom(req.params.roomId);
-    if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
-
-    const me = room.players.find(p => p.id === playerId);
-    if (!me) return res.status(403).json({ success: false, error: 'Вы не участник' });
-
-    if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-
-    const paddleYQuery = req.query.paddleY;
-    if (paddleYQuery !== undefined && paddleYQuery !== '') {
-        const y = Number(paddleYQuery);
-        if (!isNaN(y)) {
-            me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
-        }
-    }
-
-    const playerIndex = room.players.indexOf(me);
-    const now = nowMs();
-
-    if (room.state === 'countdown' && now >= room.countdownEnd) {
-        room.state = 'playing';
-        room.countdownIsInitial = false;
-        randomizePongVelocity(room);
-        room.lastTick = room.countdownEnd;
-    }
-
-    if ((room.state === 'playing' || room.state === 'countdown')) {
-        const opp = room.players.find(p => p.id !== playerId);
-        if (opp && room.lastSeen[opp.id] && now - room.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
-            room.state = 'finished';
-            room.winner = playerIndex;
-            room.finishedAt = now;
-        }
-    }
-
-    if (room.state === 'playing') {
-        // Ограничиваем шаг симуляции: при лагах/пропущенных опросах мяч
-        // не должен «телепортироваться» через всё поле.
-        const realDt = Math.min(now - room.lastTick, 100);
-        room.lastTick = now;
-        const substeps = Math.min(PONG_MAX_SUBSTEPS, Math.max(1, Math.ceil(realDt / PONG_MAX_STEP_MS)));
-        const dtPerStep = realDt / substeps;
-
-        for (let s = 0; s < substeps; s++) {
-            const dt = dtPerStep / 16.66;
-            room.ball.x += room.ball.vx * dt;
-            room.ball.y += room.ball.vy * dt;
-
-            if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
-            else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
-
-            const HIT = PONG_HITBOX_PAD;
-            const p1Top = room.players[0].paddleY - PONG_PH / 2;
-            if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
-                if (room.ball.y + PONG_BS >= p1Top - HIT && room.ball.y <= p1Top + PONG_PH + HIT) {
-                    room.ball.x = PONG_PW;
-                    room.ball.vx *= -1.1;
-                    room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[0].paddleY) / PONG_PH) * 10;
-                }
-            }
-            const p2Top = room.players[1].paddleY - PONG_PH / 2;
-            if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
-                if (room.ball.y + PONG_BS >= p2Top - HIT && room.ball.y <= p2Top + PONG_PH + HIT) {
-                    room.ball.x = PONG_W - PONG_PW - PONG_BS;
-                    room.ball.vx *= -1.1;
-                    room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[1].paddleY) / PONG_PH) * 10;
-                }
-            }
-            room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
-            room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
-
-            if (room.ball.x < 0) {
-                room.score.p2++;
-                resetBall(room);
-                room.state = 'countdown';
-                room.countdownEnd = nowMs() + PONG_GOAL_COUNTDOWN;
-                room.countdownIsInitial = false;
-                room.lastTick = nowMs();
-                break;
-            } else if (room.ball.x > PONG_W) {
-                room.score.p1++;
-                resetBall(room);
-                room.state = 'countdown';
-                room.countdownEnd = nowMs() + PONG_GOAL_COUNTDOWN;
-                room.countdownIsInitial = false;
-                room.lastTick = nowMs();
-                break;
-            }
-        }
-
-        if (room.score.p1 >= PONG_WIN || room.score.p2 >= PONG_WIN) {
-            room.state = 'finished';
-            room.winner = room.score.p1 >= PONG_WIN ? 0 : 1;
-            room.finishedAt = nowMs();
-        }
-    }
-
-    res.json({
-        success: true,
-        playerIndex,
-        state: {
-            ball: { x: room.ball.x, y: room.ball.y, vx: room.ball.vx, vy: room.ball.vy },
-            score: { p1: room.score.p1, p2: room.score.p2 },
-            p1Y: room.players[0].paddleY,
-            p2Y: room.players[1].paddleY,
-            state: room.state,
-            winner: room.winner !== undefined ? room.winner : null,
-            countdownRemaining: room.state === 'countdown' ? Math.max(0, room.countdownEnd - now) : 0,
-            countdownIsInitial: room.state === 'countdown' ? room.countdownIsInitial : false,
-            timestamp: now
-        }
-    });
-});
-
-app.post('/api/pong/room/:roomId/move', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const room = getPongRoom(req.params.roomId);
-    if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
-    const player = room.players.find(p => p.id === playerId);
-    if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
-
-    if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-    const { y } = req.body || {};
-    player.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, Number(y) || player.paddleY));
-    res.json({ success: true });
-});
-
-app.post('/api/pong/room/:roomId/leave', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const room = getPongRoom(req.params.roomId);
-    if (!room) return res.json({ success: true });
-
-    if (!room.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник комнаты' });
-    }
-
-    if (room.state !== 'finished') {
-        const idx = room.players.findIndex(p => p.id === playerId);
-        room.winner = idx === 0 ? 1 : idx === 1 ? 0 : null;
-        room.state = 'finished';
-        room.finishedAt = nowMs();
-    }
-    res.json({ success: true });
-});
-
-// ============================================================
 // ФОНОВАЯ ОЧИСТКА
 // ============================================================
 setInterval(() => {
@@ -1126,22 +869,6 @@ setInterval(() => {
     for (let i = chessQueue.length - 1; i >= 0; i--) {
         if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
     }
-
-    for (const id of Object.keys(pongRooms)) {
-        const r = pongRooms[id];
-        if (r.state === 'finished') {
-            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
-            continue;
-        }
-        if (r.players.length === 2) {
-            const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
-            const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
-            if ((now - seenA > DISCONNECT_TIMEOUT) && (now - seenB > DISCONNECT_TIMEOUT)) delete pongRooms[id];
-        }
-    }
-    for (let i = pongQueue.length - 1; i >= 0; i--) {
-        if (now - pongQueue[i].timestamp > MATCHMAKING_TIMEOUT) pongQueue.splice(i, 1);
-    }
 }, 30 * 1000).unref?.();
 
 // ============================================================
@@ -1151,7 +878,7 @@ function makeCancelHandler(queueName) {
     return (req, res) => {
         const playerId = getAuthedPlayerId(req);
         if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-        const queues = { checkers: matchmakingQueue, chess: chessQueue, pong: pongQueue };
+        const queues = { checkers: matchmakingQueue, chess: chessQueue };
         const q = queues[queueName];
         const i = q.findIndex(p => p.id === playerId);
         if (i !== -1) q.splice(i, 1);
@@ -1160,7 +887,6 @@ function makeCancelHandler(queueName) {
 }
 app.post('/api/checkers/cancel', makeCancelHandler('checkers'));
 app.post('/api/chess/cancel',    makeCancelHandler('chess'));
-app.post('/api/pong/cancel',     makeCancelHandler('pong'));
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
