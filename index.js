@@ -40,6 +40,116 @@ const SESSION_RATE_MAX = 20;
 const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000;
 
 // ============================================================
+// КОНФИГУРАЦИЯ КЛИКЕРА (для серверных расчётов)
+// ============================================================
+const COW_CONFIG = {
+    clickUps: [
+        { id: 'hands',   cost: 15,     effect: 1,      mult: 1.15 },
+        { id: 'bicep',   cost: 500,    effect: 10,     mult: 1.20 },
+        { id: 'steel',   cost: 5e4,    effect: 100,    mult: 1.25 },
+        { id: 'diamond', cost: 5e6,    effect: 1000,   mult: 1.30 },
+        { id: 'plasma',  cost: 5e8,    effect: 1e4,    mult: 1.35 },
+        { id: 'cosmic',  cost: 5e10,   effect: 1e5,    mult: 1.40 },
+        { id: 'divine',  cost: 5e12,   effect: 1e6,    mult: 1.50 },
+    ],
+    buildings: [
+        { id: 'cat',      cost: 15,     prod: 0.15,  mult: 1.15 },
+        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15 },
+        { id: 'auto',     cost: 1100,   prod: 8,     mult: 1.15 },
+        { id: 'plant',    cost: 12000,  prod: 47,    mult: 1.15 },
+        { id: 'cheese',   cost: 130000, prod: 260,   mult: 1.15 },
+        { id: 'bank',     cost: 1.4e6,  prod: 1400,  mult: 1.15 },
+        { id: 'cosmo',    cost: 2e7,    prod: 7800,  mult: 1.15 },
+        { id: 'quantum',  cost: 3.3e8,  prod: 4.4e4, mult: 1.15 },
+        { id: 'portal',   cost: 5.1e9,  prod: 2.6e5, mult: 1.15 },
+        { id: 'alchemy',  cost: 7.5e10, prod: 1.6e6, mult: 1.15 },
+        { id: 'time',     cost: 1e12,   prod: 1e7,   mult: 1.15 },
+        { id: 'infinity', cost: 1.4e13, prod: 6.5e7, mult: 1.15 },
+    ],
+    mults: [
+        { id: 'hay',    cost: 1e4,  factor: 2 },
+        { id: 'gmo',    cost: 1e5,  factor: 2 },
+        { id: 'wonder', cost: 1e6,  factor: 3 },
+        { id: 'nano',   cost: 1e7,  factor: 3 },
+        { id: 'legend', cost: 1e8,  factor: 5 },
+        { id: 'meta',   cost: 1e10, factor: 5 },
+        { id: 'void',   cost: 1e12, factor: 10 },
+    ],
+    achievements: [
+        { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e4,  bonus: 0.01 },
+        { threshold: 1e5,  bonus: 0.01 }, { threshold: 1e6,  bonus: 0.02 },
+        { threshold: 1e7,  bonus: 0.02 }, { threshold: 1e8,  bonus: 0.02 },
+        { threshold: 1e9,  bonus: 0.03 }, { threshold: 1e10, bonus: 0.03 },
+        { threshold: 1e11, bonus: 0.03 }, { threshold: 1e12, bonus: 0.05 },
+        { threshold: 1e13, bonus: 0.05 }, { threshold: 1e14, bonus: 0.05 },
+        { threshold: 1e15, bonus: 0.10 }, { threshold: 1e16, bonus: 0.10 },
+    ],
+    milestones: [25, 50, 100, 200, 300, 400, 500],
+    prestigeBase: 5e7,
+    prestigeStep: 5,
+    prestigeMult: 1.5,
+};
+
+const cowStates = new Map(); // Кэш активных игроков в памяти
+
+function calcCowMath(s) {
+    let achBonus = 0;
+    for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
+    
+    let gMult = 1;
+    for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
+    gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
+    gMult *= (1 + achBonus);
+
+    let mps = 0;
+    for (const b of COW_CONFIG.buildings) {
+        const owned = s.buildings[b.id] || 0;
+        let mileMult = 1;
+        for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
+        mps += owned * b.prod * mileMult;
+    }
+    mps *= gMult;
+
+    let cp = 1;
+    for (const u of COW_CONFIG.clickUps) {
+        cp += (s.clickUps[u.id] || 0) * u.effect;
+    }
+    cp *= gMult;
+
+    return { mps, cp };
+}
+
+function tickCow(s) {
+    const now = Date.now();
+    // Ограничиваем оффлайн-доход 24 часами, чтобы не фармили вечность
+    const dt = Math.max(0, Math.min(24 * 3600, (now - (s.lastUpdate || now)) / 1000));
+    const { mps } = calcCowMath(s);
+    s.milk += mps * dt;
+    s.totalMilk += mps * dt;
+    s.lastUpdate = now;
+}
+
+async function getCowState(playerId) {
+    if (cowStates.has(playerId)) return cowStates.get(playerId);
+    const raw = await redis('GET', 'cow:' + playerId);
+    let state = raw ? JSON.parse(raw) : { milk: 0, totalMilk: 0, lastUpdate: Date.now(), clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0 };
+    tickCow(state);
+    cowStates.set(playerId, state);
+    return state;
+}
+
+async function saveCowState(playerId) {
+    const s = cowStates.get(playerId);
+    if (!s) return;
+    await redis('SET', 'cow:' + playerId, JSON.stringify(s));
+}
+
+// Сброс в Redis раз в минуту
+setInterval(() => {
+    for (const pid of cowStates.keys()) saveCowState(pid);
+}, 60000).unref?.();
+
+// ============================================================
 // БЕЛЫЙ СПИСОК ИГР
 // ============================================================
 const GAME_RULES = {
@@ -58,7 +168,7 @@ const GAME_RULES = {
     'chess':         { lower: false, maxScore: 99999,   minSeconds: 0 },
     'checkers-mp':   { lower: false, maxScore: 99999,   minSeconds: 0 },
     'chess-mp':      { lower: false, maxScore: 99999,   minSeconds: 0 },
-    'cowclicker':    { lower: false, maxScore: 1e18, minSeconds: 60 },,
+    'cowclicker':    { lower: false, maxScore: 1e18, minSeconds: 60 },
 };
 
 // ============================================================
@@ -347,6 +457,8 @@ app.post('/api/scores', (req, res) => {
             success: false,
             error: 'Рекорды этой игры учитываются сервером автоматически'
         });
+        if (gameId === 'cowclicker') {
+        return res.status(400).json({ success: false, error: 'Рекорды кликера считаются автоматически на сервере' });
     }
 
     nickname = sanitizeNickname(nickname);
@@ -423,6 +535,121 @@ app.get('/api/scores/:gameId', (req, res) => {
         losses: s.losses || 0
     }));
     res.json({ success: true, scores });
+});
+
+// ============================================================
+// API КЛИКЕРА (Серверный античит)
+// ============================================================
+function syncCowLeaderboard(playerId, s) {
+    const score = Math.floor(s.totalMilk);
+    if (!leaderboards['cowclicker']) leaderboards['cowclicker'] = [];
+    const lb = leaderboards['cowclicker'];
+    const existing = lb.find(x => x.playerId === playerId);
+    if (existing) {
+        if (score > existing.score) { existing.score = score; existing.date = Date.now(); isLeaderboardDirty = true; }
+    } else if (score > 0) {
+        const p = players.get(playerId);
+        const nickname = p ? p.nickname : 'Аноним';
+        lb.push({ playerId, nickname, score, losses: 0, date: Date.now() });
+        isLeaderboardDirty = true;
+    }
+    lb.sort((a, b) => b.score - a.score);
+    leaderboards['cowclicker'] = lb.slice(0, 10);
+}
+
+app.post('/api/cow/sync', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const state = await getCowState(playerId);
+    syncCowLeaderboard(playerId, state);
+    res.json({ success: true, state });
+});
+
+app.post('/api/cow/click', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const { clicks } = req.body;
+    if (typeof clicks !== 'number' || clicks <= 0) return res.status(400).json({ success: false });
+
+    const state = await getCowState(playerId);
+    const now = Date.now();
+    const timeDiff = (now - (state.lastClickTime || now - 1000)) / 1000;
+    
+    // Античит: максимум 20 кликов в секунду
+    if (clicks > timeDiff * 20 + 5) {
+        return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
+    }
+
+    const { cp } = calcCowMath(state);
+    state.milk += clicks * cp;
+    state.totalMilk += clicks * cp;
+    state.lastClickTime = now;
+    state.lastUpdate = now;
+
+    syncCowLeaderboard(playerId, state);
+    res.json({ success: true, milk: state.milk, totalMilk: state.totalMilk });
+});
+
+app.post('/api/cow/buy', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const { type, id, qty } = req.body;
+    
+    const state = await getCowState(playerId);
+    tickCow(state);
+
+    if (type === 'building') {
+        const cfg = COW_CONFIG.buildings.find(b => b.id === id);
+        if (!cfg) return res.status(400).json({ success: false });
+        const owned = state.buildings[id] || 0;
+        let price = 0;
+        for (let i = 0; i < qty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
+        price = Math.floor(price);
+        
+        if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+        state.milk -= price;
+        state.buildings[id] = owned + qty;
+    } 
+    else if (type === 'clickUp') {
+        const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
+        if (!cfg) return res.status(400).json({ success: false });
+        const owned = state.clickUps[id] || 0;
+        const price = Math.floor(cfg.cost * Math.pow(cfg.mult, owned));
+        
+        if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+        state.milk -= price;
+        state.clickUps[id] = owned + 1;
+    }
+    else if (type === 'mult') {
+        const cfg = COW_CONFIG.mults.find(m => m.id === id);
+        if (!cfg || state.multipliers[id]) return res.status(400).json({ success: false });
+        if (state.milk < cfg.cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+        state.milk -= cfg.cost;
+        state.multipliers[id] = true;
+    }
+
+    saveCowState(playerId);
+    syncCowLeaderboard(playerId, state);
+    res.json({ success: true, milk: state.milk });
+});
+
+app.post('/api/cow/prestige', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+
+    const state = await getCowState(playerId);
+    const cost = Math.floor(COW_CONFIG.prestigeBase * Math.pow(COW_CONFIG.prestigeStep, state.prestigeLevel));
+
+    if (state.milk < cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+
+    state.prestigeLevel += 1;
+    state.milk = 0;
+    state.clickUps = {};
+    state.buildings = {};
+    state.multipliers = {};
+    
+    saveCowState(playerId);
+    res.json({ success: true, state });
 });
 
 // ============================================================
