@@ -14,7 +14,7 @@ app.set('trust proxy', TRUST_PROXY ? 1 : false);
 // КОНСТАНТЫ
 // ============================================================
 const MATCHMAKING_TIMEOUT = 30 * 1000;
-const DISCONNECT_TIMEOUT = 60 * 1000;
+const DISCONNECT_TIMEOUT = 120 * 1000;
 const FINISHED_MATCH_TTL = 10 * 60 * 1000;
 const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
 const SESSION_TTL = 2 * 60 * 60 * 1000;
