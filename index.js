@@ -23,6 +23,9 @@ const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
 const DRAW_HM_LIMIT = 30;
 const REPEAT_LIMIT = 3;
 
+// Pong — 1:1 с офлайн-версией в userscript
+const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
+
 // ============================================================
 // ХРАНИЛИЩА
 // ============================================================
@@ -31,7 +34,7 @@ const chessMatches = {};
 const matchmakingQueue = [];
 const chessQueue = [];
 const pongRooms = {};
-const pongQueue = [];      // очередь поиска для Pong
+const pongQueue = [];
 const leaderboards = {
     mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
 };
@@ -68,7 +71,14 @@ function checkChessDraw(match) {
 }
 
 function resetBall(room) {
-    room.ball = { x: 200, y: 150, vx: Math.random() > 0.5 ? 5 : -5, vy: (Math.random() - 0.5) * 6 };
+    const dirX = Math.random() > 0.5 ? 1 : -1;
+    const dirY = Math.random() > 0.5 ? 1 : -1;
+    room.ball = {
+        x: PONG_W / 2 - PONG_BS / 2,
+        y: PONG_H / 2 - PONG_BS / 2,
+        vx: 4 * dirX,
+        vy: 4 * dirY * (Math.random() * 0.5 + 0.5)
+    };
 }
 
 // ============================================================
@@ -306,7 +316,6 @@ app.post('/api/pong/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
 
-    // Уже в активной игре?
     const activeRoom = Object.values(pongRooms).find(r =>
         r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (activeRoom) {
@@ -315,7 +324,6 @@ app.post('/api/pong/find-match', (req, res) => {
         return res.json({ success: true, roomId: activeRoom.id, playerIndex: me ? activeRoom.players.indexOf(me) : -1 });
     }
 
-    // Уже в очереди?
     if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
     if (pongQueue.length > 0) {
@@ -373,18 +381,14 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     const me = playerId ? room.players.find(p => p.id === playerId) : null;
     const playerIndex = me ? room.players.indexOf(me) : -1;
 
-    // ---- Физика: 1:1 с офлайн-версией ----
     if (room.state === 'playing') {
         const now = nowMs();
-        // dt в "кадрах" (1 кадр = 16.66 мс). Ограничение — защита от длинных пауз.
         const dtFrames = Math.min((now - room.lastTick) / 16.66, 20);
         room.lastTick = now;
 
-        // Движение мяча
         room.ball.x += room.ball.vx * dtFrames;
         room.ball.y += room.ball.vy * dtFrames;
 
-        // Отскок от верха/низа
         if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
         else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
 
@@ -392,7 +396,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         const p1Top = p1.paddleY - PONG_PH / 2;
         const p2Top = p2.paddleY - PONG_PH / 2;
 
-        // Левая ракетка (игрок 0)
         if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
             if (room.ball.y + PONG_BS >= p1Top && room.ball.y <= p1Top + PONG_PH) {
                 room.ball.x = PONG_PW;
@@ -400,7 +403,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
                 room.ball.vy = ((room.ball.y + PONG_BS / 2 - p1.paddleY) / PONG_PH) * 10;
             }
         }
-        // Правая ракетка (игрок 1)
         if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
             if (room.ball.y + PONG_BS >= p2Top && room.ball.y <= p2Top + PONG_PH) {
                 room.ball.x = PONG_W - PONG_PW - PONG_BS;
@@ -409,11 +411,9 @@ app.get('/api/pong/room/:roomId', (req, res) => {
             }
         }
 
-        // Ограничение скорости
         room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
         room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
-        // Голы (проверяем ПОСЛЕ удара о ракетку — как в офлайне)
         if (room.ball.x < 0) { room.score.p2++; resetBall(room); room.lastTick = nowMs(); }
         else if (room.ball.x > PONG_W) { room.score.p1++; resetBall(room); room.lastTick = nowMs(); }
 
@@ -445,7 +445,6 @@ app.post('/api/pong/room/:roomId/move', (req, res) => {
     if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
 
     if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-    // Ограничиваем центр ракетки — как в офлайн-версии (H/2 ± PH/2)
     player.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
     res.json({ success: true });
 });
@@ -465,7 +464,7 @@ app.post('/api/pong/room/:roomId/leave', (req, res) => {
 setInterval(() => {
     const now = nowMs();
 
-    // --- ШАШКИ ОНЛАЙН ---
+    // ШАШКИ
     for (const id of Object.keys(matches)) {
         const m = matches[id];
         if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
@@ -481,7 +480,7 @@ setInterval(() => {
         if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
     }
 
-    // --- ШАХМАТЫ ОНЛАЙН ---
+    // ШАХМАТЫ
     for (const id of Object.keys(chessMatches)) {
         const m = chessMatches[id];
         if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
@@ -497,19 +496,13 @@ setInterval(() => {
         if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
     }
 
-    // --- ПИНГ-ПОНГ ОНЛАЙН ---
+    // ПИНГ-ПОНГ
     for (const id of Object.keys(pongRooms)) {
         const r = pongRooms[id];
-
-        // Завершённые комнаты — удаляем по TTL
         if (r.state === 'finished') {
-            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) {
-                delete pongRooms[id];
-            }
+            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
             continue;
         }
-
-        // Активные — если ОБА игрока молчат, комната брошена
         if (r.state === 'playing' && r.players.length === 2) {
             const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
             const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
