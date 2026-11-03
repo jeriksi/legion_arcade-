@@ -24,7 +24,7 @@
     // ============================================================
     const SERVER_URL = 'https://legion-arcade.onrender.com';
 
-    // ============================================================
+        // ============================================================
     // Хранилище и утилиты
     // ============================================================
     const LS = 'lgArcade.';
@@ -40,22 +40,23 @@
         }
     };
 
+    let cachedPlayerName = null;
     function getPlayerName() {
+        if (cachedPlayerName) return cachedPlayerName;
         const el = document.querySelector('span.who');
-        return el ? el.textContent.trim() : null; // Возвращаем null, если ник еще не прогрузился
+        if (el && el.textContent.trim()) {
+            cachedPlayerName = el.textContent.trim();
+            return cachedPlayerName;
+        }
+        return null;
     }
 
+    // Ищем токен в новом формате
     function getToken() {
         if (typeof GM_getValue === 'function') {
             try {
-                const name = getPlayerName();
-                if (!name) return null; // Ждем прогрузки
-                const v = GM_getValue('lgArcade.playerToken_' + name, undefined);
+                const v = GM_getValue('lgArcade.playerToken', undefined);
                 if (v !== undefined && v !== null && v !== '') return v;
-
-                // Миграция для старых токенов
-                const legacy = store.get('playerToken', null);
-                if (legacy && name === 'Игрок') return legacy;
             } catch (e) {}
         }
         return null;
@@ -64,16 +65,15 @@
     function setToken(v) {
         if (typeof GM_setValue !== 'function') return false;
         try {
-            const name = getPlayerName() || 'Игрок';
-            GM_setValue('lgArcade.playerToken_' + name, v);
+            GM_setValue('lgArcade.playerToken', v);
             return true;
         } catch (e) { return false; }
     }
 
-    let playerId = store.get('playerId', null);
     let playerToken = getToken();
-    // МЫ УБРАЛИ ОЧИСТКУ playerId ОТСЮДА, чтобы не терять данные при загрузке
+    let playerId = store.get('playerId', null);
 
+    // Сырой запрос с автоматическим Bearer.
     function rawRequest(path, options = {}) {
         return new Promise((resolve) => {
             const headers = { 'Content-Type': 'application/json' };
@@ -89,7 +89,7 @@
                     try { resolve(JSON.parse(res.responseText)); }
                     catch (e) { resolve({ success: false, error: 'Ошибка парсинга ответа' }); }
                 },
-                onerror: () => resolve({ success: false, error: 'Сетевая ошибка (сервер выключен)' }),
+                onerror: () => resolve({ success: false, error: 'Сетевая ошибка' }),
                 ontimeout: () => resolve({ success: false, error: 'Сервер не отвечает.' })
             });
         });
@@ -97,12 +97,12 @@
 
     let registeringPromise = null;
     async function ensureRegistered() {
-        if (playerToken && playerId) return true;
+        if (playerToken) return true;
         if (registeringPromise) return registeringPromise;
 
         registeringPromise = (async () => {
             try {
-                // Ждем до 10 секунд, пока сайт прогрузит ваш ник
+                // 1. Ждем прогрузки ника (нужно для миграции старого токена)
                 let name = getPlayerName();
                 let attempts = 0;
                 while (!name && attempts < 20) {
@@ -110,17 +110,28 @@
                     name = getPlayerName();
                     attempts++;
                 }
-                if (!name) name = 'Игрок';
 
-                // Пробуем получить токен еще раз (вдруг ник только что прогрузился)
-                playerToken = getToken();
-                if (playerToken && playerId) return true;
+                // 2. ПРОЦЕСС МИГРАЦИИ (Если токена в новом формате нет)
+                if (!playerToken && name && typeof GM_getValue === 'function') {
+                    try {
+                        // Ищем старый токен с привязкой к нику
+                        const oldToken = GM_getValue('lgArcade.playerToken_' + name, null);
+                        if (oldToken) {
+                            console.log('[Legion Arcade] Найден старый токен, мигрируем на новый формат...');
+                            playerToken = oldToken;
+                            setToken(playerToken); // Сохраняем в новый ключ
+                        }
+                    } catch (e) {}
+                }
 
-                // Если токена нет — регистрируемся
+                // Если токен нашли (или он уже был) — мы авторизованы
+                if (playerToken) return true;
+
+                // 3. Если токена вообще нет — регистрируем нового игрока
                 const res = await rawRequest('/api/player/register', { method: 'POST', body: '{}' });
-                if (res && res.success && res.playerId && res.token) {
-                    playerId = res.playerId;
+                if (res && res.success && res.token) {
                     playerToken = res.token;
+                    playerId = res.playerId;
                     store.set('playerId', playerId);
                     setToken(playerToken);
                     return true;
@@ -141,26 +152,22 @@
 
         let res = await rawRequest(path, options);
 
-        // Если сервер ответил "Не авторизован" (например, он только что перезагрузился)
         if (path !== '/api/player/register' && res && !res.success &&
             (res.error === 'Не авторизован' || res.error === 'Неверный токен')) {
 
-            // Ждем 2 секунды и пробуем еще раз, НЕ удаляя токен
-            await new Promise(r => setTimeout(r, 2000));
-            res = await rawRequest(path, options);
+            // Если сервер говорит, что токен невалиден, сбрасываем и регаем нового
+            playerToken = null;
+            playerId = null;
+            store.set('playerId', null);
+            setToken(null);
 
-            // Если снова ошибка — значит токен реально устарел
-            if (!res.success && (res.error === 'Не авторизован' || res.error === 'Неверный токен')) {
-                playerId = null; playerToken = null;
-                store.set('playerId', null); setToken(null);
-                const ok = await ensureRegistered();
-                if (ok) res = await rawRequest(path, options);
-            }
+            const ok = await ensureRegistered();
+            if (ok) res = await rawRequest(path, options);
         }
         return res;
     }
 
-    // Регистрируемся сразу при загрузке (функция сама подождет нужный ник).
+    // Запускаем регистрацию/миграцию в фоне
     ensureRegistered();
 
     async function startSession(gameId) {
@@ -1417,6 +1424,7 @@
             let selectedSquare = null, validMoves = [], isProcessing = false;
             let statusPollTimer = null, matchPollTimer = null, waitInterval = null;
             let searchGen = 0;
+            let pollFailures = 0; // Счетчик ошибок сети
 
             const lobbyEl = h('div', { class: 'mp-lobby', style: 'text-align: center; min-height: 200px; justify-content: center;' });
             const gameEl  = h('div', { style: 'display: none; flex-direction: column; align-items: center;' });
@@ -1476,14 +1484,39 @@
 
             function startGame(id) {
                 matchId = id; myColor = null; currentMatch = null; selectedSquare = null; validMoves = []; isProcessing = false;
+                pollFailures = 0; // Сброс ошибок
                 lobbyEl.style.display = 'none'; gameEl.style.display = 'flex'; stopAllTimers(); matchPollTimer = setInterval(pollMatch, 1500); pollMatch();
             }
 
             async function pollMatch() {
                 if (!matchId) return;
                 const res = await serverRequest(`/api/checkers/match/${matchId}`);
-                if (!res || !res.success || !res.match) { showLobby(); return; }
+
+                // ЗАЩИТА ОТ СЕТЕВЫХ СБОЕВ
+                if (!res || !res.success) {
+                    if (!res || res.error === 'Сетевая ошибка (сервер выключен)' || res.error === 'Сервер не отвечает.' || res.error === 'Ошибка парсинга ответа') {
+                        pollFailures++;
+                        statusEl.textContent = `⚠️ Сбой сети. Переподключение... (${pollFailures}/5)`;
+                        statusEl.style.color = '#ff6b6b';
+                        if (pollFailures >= 5) {
+                            alert('Связь с сервером потеряна. Возврат в лобби.');
+                            showLobby();
+                        }
+                        return;
+                    }
+
+                    if (res.error === 'Матч не найден' || res.error === 'Вы не участник' || res.error === 'Не авторизован') {
+                        showLobby();
+                        return;
+                    }
+
+                    showLobby();
+                    return;
+                }
+
+                pollFailures = 0; // Сброс ошибок при успешном ответе
                 currentMatch = res.match;
+
                 if (!myColor) { const me = currentMatch.players.find(p => p.id === playerId); if (me) myColor = me.color; }
                 if (currentMatch.status === 'playing' && currentMatch.gameState.turn !== myColor) { selectedSquare = null; validMoves = []; }
                 renderBoard();
@@ -1563,7 +1596,7 @@
     // ============================================================
     // ИГРА: ШАХМАТЫ ОНЛАЙН
     // ============================================================
-        const OnlineChess = {
+    const OnlineChess = {
         id: 'chess-mp', name: 'Шахматы Онлайн', icon: '🌐', ring: '#b9a6e0', category: 'multi',
         subtitle() { return 'поиск соперника'; },
         mount(root, api) {
@@ -1571,6 +1604,7 @@
             let selectedSquare = null, validMoves = [], isProcessing = false;
             let statusPollTimer = null, matchPollTimer = null, waitInterval = null;
             let promoMoves = [];
+            let pollFailures = 0; // Счетчик ошибок сети
 
             const lobbyEl = h('div', { class: 'mp-lobby', style: 'text-align: center; min-height: 200px; justify-content: center;' });
             const gameEl  = h('div', { style: 'display: none; flex-direction: column; align-items: center;' });
@@ -1626,17 +1660,42 @@
 
             function startGame(id) {
                 matchId = id; myColor = null; currentMatch = null; selectedSquare = null; validMoves = []; isProcessing = false; promoMoves = []; promoEl.textContent = '';
+                pollFailures = 0; // Сброс ошибок
                 lobbyEl.style.display = 'none'; gameEl.style.display = 'flex'; stopAllTimers(); matchPollTimer = setInterval(pollMatch, 1500); pollMatch();
             }
 
             async function pollMatch() {
                 if (!matchId) return;
                 const res = await serverRequest(`/api/chess/match/${matchId}`);
-                if (!res || !res.success || !res.match) { showLobby(); return; }
+
+                // ЗАЩИТА ОТ СЕТЕВЫХ СБОЕВ
+                if (!res || !res.success) {
+                    if (!res || res.error === 'Сетевая ошибка (сервер выключен)' || res.error === 'Сервер не отвечает.' || res.error === 'Ошибка парсинга ответа') {
+                        pollFailures++;
+                        statusEl.textContent = `⚠️ Сбой сети. Переподключение... (${pollFailures}/5)`;
+                        statusEl.style.color = '#ff6b6b';
+                        if (pollFailures >= 5) {
+                            alert('Связь с сервером потеряна. Возврат в лобби.');
+                            showLobby();
+                        }
+                        return;
+                    }
+
+                    if (res.error === 'Матч не найден' || res.error === 'Вы не участник' || res.error === 'Не авторизован') {
+                        showLobby();
+                        return;
+                    }
+
+                    showLobby();
+                    return;
+                }
+
+                pollFailures = 0; // Сброс ошибок при успешном ответе
                 currentMatch = res.match;
+
                 if (!myColor) { const me = currentMatch.players.find(p => p.id === playerId); if (me) myColor = me.color; }
                 if (currentMatch.status === 'playing' && currentMatch.gameState.turn !== myColor) { selectedSquare = null; validMoves = []; promoMoves = []; promoEl.textContent = ''; }
-                // Рекорд пишет сервер при завершении матча.
+
                 renderBoard();
             }
 
@@ -1737,20 +1796,23 @@
         }
     };
 
-    // ============================================================
-    // Утилита форматирования чисел для кликера
-    // ============================================================
-    function cowFmtNum(n) {
-        if (!n || n < 1000) return Math.floor(n || 0).toString();
-        const suffixes = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'];
-        let tier = Math.floor(Math.log10(n) / 3);
-        if (tier >= suffixes.length) tier = suffixes.length - 1;
-        const scaled = n / Math.pow(10, tier * 3);
-        return scaled.toFixed(scaled < 100 ? 2 : 1) + suffixes[tier];
+// ============================================================
+// Утилита форматирования чисел
+// ============================================================
+function cowFmtNum(n) {
+    if (!n || n === 0) return '0';
+    if (n < 1000) {
+        return Number.isInteger(n) ? n.toString() : n.toFixed(2).replace(/\.?0+$/, '');
     }
+    const suffixes = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'];
+    let tier = Math.floor(Math.log10(n) / 3);
+    if (tier >= suffixes.length) tier = suffixes.length - 1;
+    const scaled = n / Math.pow(10, tier * 3);
+    return scaled.toFixed(scaled < 100 ? 2 : 1) + suffixes[tier];
+}
 
 // ============================================================
-// ИГРА: МОЛОЧНАЯ ФЕРМА (кликер)
+// ИГРА: МОЛОЧНАЯ ФЕРМА
 // ============================================================
 const CowClicker = {
     id: 'cowclicker',
@@ -1758,22 +1820,49 @@ const CowClicker = {
     icon: '🐄',
     ring: '#e8b05c',
     category: 'solo',
-    subtitle() {
-        const s = store.get('cow.state', null);
-        if (!s) return 'кликер · коровы ждут';
-        const p = s.prestigeLevel || 0;
-        return cowFmtNum(s.totalMilk || 0) + ' 🥛' + (p > 0 ? ' · ⭐' + p : '');
-    },
+    subtitle() { const s = store.get('cow.state', null); return s ? cowFmtNum(s.totalMilk || 0) + ' 🥛' : 'кликер · коровы ждут'; },
     mount(root, api) {
         let state = {
             milk: 0, totalMilk: 0, clickUps: {}, buildings: {}, multipliers: {},
-            prestigeLevel: 0
+            prestigeLevel: 0, nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
+            crystals: 0, cases: 0
         };
 
         let pendingClicks = 0;
         let clickTimeout = null;
         let isSyncing = false;
-        let buyMode = store.get('cow.buyMode', 1); // 1, 10, 100, 'max'
+        let buyMode = store.get('cow.buyMode', 1);
+
+        const CLIENT_SKINS = [
+            { id: 'normal',  name: 'Обычная',       icon: '🐄', color: '', rarity: 'common', price: 40 },
+            { id: 'cool',    name: 'Ледяная',       icon: '🐄', color: 'hue-rotate(180deg) contrast(1.2) saturate(1.5) drop-shadow(0 0 12px #66ccff)', rarity: 'common', price: 40 },
+            { id: 'pink',    name: 'Розовая',       icon: '🐄', color: 'hue-rotate(-40deg) saturate(2) drop-shadow(0 0 12px pink)', rarity: 'common', price: 40 },
+            { id: 'green',   name: 'Луговая',       icon: '🐄', color: 'hue-rotate(120deg) saturate(1.8) drop-shadow(0 0 12px #55ff55)', rarity: 'common', price: 40 },
+            { id: 'golden',  name: 'Золотая',       icon: '🐄', color: 'hue-rotate(45deg) saturate(3) drop-shadow(0 0 18px gold)', rarity: 'rare', price: 150 },
+            { id: 'purple',  name: 'Аметистовая',   icon: '🐄', color: 'hue-rotate(270deg) saturate(2.5) drop-shadow(0 0 18px #b844ff)', rarity: 'rare', price: 150 },
+            { id: 'ghost',   name: 'Призрачная',    icon: '🐄', color: 'brightness(1.6) opacity(0.85) drop-shadow(0 0 22px white)', rarity: 'epic', price: 400 },
+            { id: 'cyber',   name: 'Кибер-корова',  icon: '🐄', color: 'hue-rotate(300deg) saturate(5) contrast(1.6) drop-shadow(0 0 22px magenta)', rarity: 'epic', price: 400 },
+            { id: 'diamond', name: 'Алмазная',      icon: '🐄', color: 'hue-rotate(180deg) saturate(5) brightness(1.3) drop-shadow(0 0 28px cyan)', rarity: 'legendary', price: 1500 },
+            { id: 'divine',  name: 'Божественная',  icon: '🐮', color: 'brightness(1.8) sepia(0.5) hue-rotate(30deg) drop-shadow(0 0 35px gold)', rarity: 'legendary', price: 1500 }
+        ];
+        const SKIN_BONUSES = {
+            normal:  { type: 'mps',      value: 0.02, desc: '+2% к производству' },
+            cool:    { type: 'cp',       value: 0.03, desc: '+3% к силе клика' },
+            pink:    { type: 'crystals', value: 0.05, desc: '+5% к кристаллам' },
+            green:   { type: 'slime',    value: 0.10, desc: '+10% к награде слизня' },
+            golden:  { type: 'mps',      value: 0.08, desc: '+8% к производству' },
+            purple:  { type: 'cp',       value: 0.08, desc: '+8% к силе клика' },
+            ghost:   { type: 'mps',      value: 0.15, desc: '+15% к производству' },
+            cyber:   { type: 'cp',       value: 0.15, desc: '+15% к силе клика' },
+            diamond: { type: 'mps',      value: 0.25, desc: '+25% к производству' },
+            divine:  { type: 'cp',       value: 0.25, desc: '+25% к силе клика' }
+        };
+
+        function getClientSkinBonus(skinId, type) {
+            const bonus = SKIN_BONUSES[skinId];
+            if (!bonus || bonus.type !== type) return 1;
+            return 1 + bonus.value;
+        }
 
         const CSS = `
         .cow-game { display: flex; flex-direction: column; gap: 10px; padding: 10px; color: #f0e6d2; font-family: var(--font); max-width: 100%; position: relative; }
@@ -1781,21 +1870,50 @@ const CowClicker = {
         .cow-milk-count { font-size: 24px; font-weight: 800; color: #f3c969; line-height: 1.1; }
         .cow-mps { font-size: 12px; color: #b8a082; font-weight: 700; margin-top: 2px; }
         .cow-stage { position: relative; display: flex; justify-content: center; align-items: center; min-height: 220px; padding: 10px; background: radial-gradient(ellipse at center, rgba(243,201,105,0.12) 0%, transparent 65%); border-radius: 12px; overflow: hidden; }
-        .cow-btn { background: none; border: none; font-size: 110px; line-height: 1; cursor: pointer; user-select: none; padding: 8px 16px; transition: transform 0.08s; filter: drop-shadow(0 6px 14px rgba(0,0,0,0.55)); }
-        .cow-btn:active { transform: scale(0.94); }
-        .cow-btn.clicked { animation: cow-pop 0.18s ease-out; }
-        @keyframes cow-pop { 0%{transform:scale(1)} 40%{transform:scale(1.12)} 100%{transform:scale(1)} }
+
+        .cow-btn { background: none; border: none; font-size: 110px; line-height: 1; cursor: pointer; user-select: none; padding: 8px 16px; filter: drop-shadow(0 6px 14px rgba(0,0,0,0.55)); animation: cow-bob 3s ease-in-out infinite; }
+        @keyframes cow-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+        .cow-btn:active { animation: none; transform: scale(0.94); }
+
         .cow-float { position: absolute; pointer-events: none; font-weight: 900; font-size: 20px; color: #f3c969; text-shadow: 0 2px 6px rgba(0,0,0,0.9); animation: cow-float-up 1s ease-out forwards; z-index: 5; }
         @keyframes cow-float-up { 0%{opacity:1;transform:translate(-50%,-50%)} 100%{opacity:0;transform:translate(-50%,-150%)} }
+
+        /* Слизень */
+        .cow-slime { position: absolute; font-size: 50px; cursor: pointer; animation: slime-wiggle 0.5s infinite; z-index: 20; filter: drop-shadow(0 0 10px #55ff55); }
+        @keyframes slime-wiggle { 0%, 100% { transform: scale(1) rotate(0deg); } 50% { transform: scale(1.2) rotate(15deg); } }
+
+        .cow-case-btn { position: absolute; right: 15px; top: 15px; background: rgba(243,201,105,0.15); border: 2px solid var(--gold); border-radius: 50%; width: 45px; height: 45px; font-size: 22px; cursor: pointer; z-index: 10; transition: transform 0.2s; display: flex; align-items: center; justify-content: center; }
+        .cow-case-btn:hover { transform: scale(1.1); }
+        .cow-case-btn.ready { animation: cow-pulse 1.5s infinite; }
+        @keyframes cow-pulse { 0% { box-shadow: 0 0 0 0 rgba(243,201,105, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(243,201,105, 0); } 100% { box-shadow: 0 0 0 0 rgba(243,201,105, 0); } }
+
+        /* Модалки */
+        .cow-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); z-index: 9999; display: none; flex-direction: column; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
+        .cow-modal-box { background: var(--bg2); padding: 20px; border-radius: 12px; border: 2px solid var(--gold); width: 90%; max-width: 500px; text-align: center; }
+
+        /* Рулетка */
+        .cs-roulette-wrap { width: 100%; height: 120px; overflow: hidden; position: relative; border: 2px solid #555; background: #1a1c23; border-radius: 8px; margin: 20px auto; box-shadow: inset 0 0 20px #000; }
+        .cs-roulette-track { display: flex; height: 100%; align-items: center; will-change: transform; }
+        .cs-item { width: 100px; height: 100px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; border-right: 1px solid #333; font-size: 45px; }
+
+        .cs-item.rarity-common { border-bottom: 5px solid #808080; }
+        .cs-item.rarity-rare { border-bottom: 5px solid #00bfff; background: linear-gradient(to top, rgba(0,191,255,0.15), transparent); }
+        .cs-item.rarity-epic { border-bottom: 5px solid #a020f0; background: linear-gradient(to top, rgba(160,32,240,0.2), transparent); }
+        .cs-item.rarity-legendary { border-bottom: 5px solid #ffd700; background: linear-gradient(to top, rgba(255,215,0,0.25), transparent); }
+        .cs-pointer { position: absolute; top: 0; bottom: 0; left: 50%; width: 4px; background: #ff4d4d; transform: translateX(-50%); z-index: 10; box-shadow: 0 0 15px #ff4d4d; }
+
         .cow-tabs { display: flex; gap: 4px; padding: 4px; background: rgba(0,0,0,0.35); border-radius: 10px; flex-wrap: wrap; }
         .cow-tab { flex: 1; min-width: 60px; padding: 8px 6px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: #b8a082; font-weight: 700; font-size: 12px; cursor: pointer; font-family: inherit; }
         .cow-tab:hover { color: #f3c969; }
         .cow-tab.on { background: rgba(243,201,105,0.18); color: #f3c969; border-color: rgba(243,201,105,0.45); }
+
         .cow-content { max-height: 300px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; scrollbar-color: #5a4a2f transparent; }
         .cow-content::-webkit-scrollbar { width: 6px; }
         .cow-content::-webkit-scrollbar-thumb { background: #5a4a2f; border-radius: 4px; }
+
         .cow-buy-mode { display: flex; gap: 4px; margin-bottom: 8px; position: sticky; top: 0; background: #1b1c23; padding: 4px 0; z-index: 2; }
         .cow-buy-mode .cow-tab { padding: 4px 10px; font-size: 11px; flex: 0 0 auto; }
+
         .cow-up { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(243,201,105,0.16); border-radius: 10px; cursor: pointer; transition: background 0.12s, border-color 0.12s, opacity 0.2s; width: 100%; text-align: left; font-family: inherit; color: inherit; }
         .cow-up:hover:not(.locked):not(.owned) { background: rgba(243,201,105,0.1); border-color: rgba(243,201,105,0.45); }
         .cow-up.locked { opacity: 0.42; }
@@ -1807,19 +1925,10 @@ const CowClicker = {
         .cow-up-right { text-align: right; flex: none; }
         .cow-up-price { font-weight: 800; color: #f3c969; font-size: 14px; white-space: nowrap; }
         .cow-up.locked .cow-up-price { color: #8a7a5a; }
-        .cow-up-count { font-size: 11px; color: #a89070; margin-top: 2px; }
+
         .cow-toast-container { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: none; z-index: 100; }
         .cow-toast { background: rgba(89,217,142,0.9); color: #0f1a13; padding: 8px 16px; border-radius: 20px; font-weight: 800; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.5); animation: cow-toast-in 0.3s ease-out; white-space: nowrap; }
         @keyframes cow-toast-in { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-        .cow-prestige-box { padding: 18px 16px; text-align: center; background: rgba(243,201,105,0.08); border: 1px solid rgba(243,201,105,0.3); border-radius: 12px; }
-        .cow-ach { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(243,201,105,0.16); border-radius: 10px; }
-        .cow-ach.locked { opacity: 0.4; }
-        .cow-ach.unlocked { border-color: rgba(89,217,142,0.5); background: rgba(89,217,142,0.08); }
-        .cow-ach-icon { font-size: 22px; }
-        .cow-ach-info { flex: 1; }
-        .cow-ach-name { font-weight: 800; font-size: 13px; }
-        .cow-ach-thr { font-size: 11px; color: #a89070; }
-        .cow-ach-bonus { color: #59d98e; font-weight: 800; font-size: 13px; }
         `;
         root.append(h('style', { text: CSS }));
 
@@ -1832,13 +1941,18 @@ const CowClicker = {
         const milkCountEl = h('div', { class: 'cow-milk-count', text: '0' });
         const mpsEl = h('div', { class: 'cow-mps', text: '0 / сек' });
         const clickPowerEl = h('div', { class: 'cow-mps', text: '+0 / клик' });
+        const crystalsEl = h('div', { class: 'cow-mps', text: '💎 0', style: 'color: #00ffff; font-size: 14px;' });
+        const casesEl = h('div', { class: 'cow-mps', text: '📦 0', style: 'font-size: 14px;' });
+
         wrap.append(h('div', { class: 'cow-header' },
             h('div', {}, milkCountEl, h('div', { style: 'font-size: 10px; color: #7a6a4a; font-weight: 800; text-transform: uppercase; margin-top: 3px;' }, 'молоко')),
-            h('div', { style: 'text-align: right;' }, mpsEl, clickPowerEl)
+            h('div', { style: 'text-align: right; display: flex; flex-direction: column; gap: 4px;' }, mpsEl, clickPowerEl, crystalsEl, casesEl)
         ));
 
         // ============================ STAGE ============================
         const stageEl = h('div', { class: 'cow-stage' });
+        const caseBtn = h('button', { class: 'cow-case-btn', text: '🛒', title: 'Магазин и Кейсы', onclick: openShop });
+        stageEl.append(caseBtn);
         const cowBtn = h('button', { class: 'cow-btn', text: '🐄', onclick: onCowClick });
         stageEl.append(cowBtn);
         wrap.append(stageEl);
@@ -1862,85 +1976,7 @@ const CowClicker = {
         wrap.append(tabsEl);
         const contentEl = h('div', { class: 'cow-content' });
         wrap.append(contentEl);
-
         let currentCards = [];
-
-        // ============================ КЛИКИ ============================
-        function onCowClick(e) {
-            const p = getLocalClickPower();
-            state.milk += p;
-            state.totalMilk += p;
-
-            cowBtn.classList.remove('clicked');
-            void cowBtn.offsetWidth;
-            cowBtn.classList.add('clicked');
-            spawnFloat('+' + cowFmtNum(p), e, '#f3c969', 20);
-            updateHeader();
-
-            pendingClicks++;
-            if (!clickTimeout) {
-                clickTimeout = setTimeout(sendClicks, 1000);
-            }
-        }
-
-        async function sendClicks() {
-            clickTimeout = null;
-            if (pendingClicks === 0 || isSyncing) return;
-            const toSend = pendingClicks;
-            pendingClicks = 0;
-
-            isSyncing = true;
-            const res = await serverRequest('/api/cow/click', {
-                method: 'POST', body: JSON.stringify({ clicks: toSend })
-            });
-            isSyncing = false;
-
-            if (res && res.success) {
-                state.milk = res.milk;
-                state.totalMilk = res.totalMilk;
-                updateHeader();
-                refreshVisibleCards();
-            } else {
-                syncState();
-            }
-        }
-
-        // ============================ ПОКУПКИ ============================
-        async function buyUpgrade(type, id, qty) {
-            const res = await serverRequest('/api/cow/buy', {
-                method: 'POST', body: JSON.stringify({ type, id, qty })
-            });
-            if (res && res.success) {
-                state.milk = res.milk;
-                syncState();
-            } else {
-                showToast(res.error || 'Ошибка покупки');
-            }
-        }
-
-        async function doPrestige() {
-            if (!confirm('Вы уверены? Весь прогресс (кроме общего молока и достижений) сбросится.')) return;
-            const res = await serverRequest('/api/cow/prestige', { method: 'POST', body: '{}' });
-            if (res && res.success) {
-                state = res.state;
-                renderAll();
-                showToast('⭐ Престиж успешно применён!');
-            }
-        }
-
-        async function syncState() {
-            const res = await serverRequest('/api/cow/sync', {
-                method: 'POST',
-                body: JSON.stringify({ nickname: getPlayerName() })
-            });
-            if (res && res.success) {
-                state = res.state;
-                updateHeader();
-                refreshVisibleCards();
-                store.set('cow.state', { totalMilk: state.totalMilk, prestigeLevel: state.prestigeLevel });
-                api.refreshCards();
-            }
-        }
 
         // ============================ КОНФИГИ ============================
         const CLICK_UPS_CFG = [
@@ -1985,47 +2021,211 @@ const CowClicker = {
             { threshold: 1e15, bonus: 0.10, name: 'Молочный титан',   icon: '👑' }, { threshold: 1e16, bonus: 0.10, name: 'За гранью',        icon: '👑' },
         ];
 
-        // ============================ РАСЧЁТЫ (UI) ============================
+        // ============================ РАСЧЁТЫ ============================
         function getLocalClickPower() {
             let ach = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) ach += a.bonus;
             let g = 1; for (const m of MULTS_CFG) if (state.multipliers[m.id]) g *= m.factor;
             g *= Math.pow(1.5, state.prestigeLevel); g *= (1 + ach);
+
             let cp = 1; for (const u of CLICK_UPS_CFG) cp += (state.clickUps[u.id] || 0) * u.effect;
-            return cp * g;
+
+            const skinBonus = getClientSkinBonus(state.currentSkin, 'cp');
+            return cp * g * skinBonus;
         }
+
         function getLocalMps() {
             let ach = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) ach += a.bonus;
             let g = 1; for (const m of MULTS_CFG) if (state.multipliers[m.id]) g *= m.factor;
             g *= Math.pow(1.5, state.prestigeLevel); g *= (1 + ach);
+
             let mps = 0; for (const b of BUILDINGS_CFG) {
                 const o = state.buildings[b.id] || 0;
                 let mm = 1; for (const t of [25, 50, 100, 200, 300, 400, 500]) if (o >= t) mm *= 2;
                 mps += o * b.prod * mm;
             }
-            return mps * g;
-        }
 
+            const skinBonus = getClientSkinBonus(state.currentSkin, 'mps');
+            return mps * g * skinBonus;
+        }
         function getBuyInfo(type, id, mode) {
             if (type === 'mult') return { qty: 1, price: MULTS_CFG.find(m=>m.id===id).cost };
             const cfg = type === 'building' ? BUILDINGS_CFG.find(b=>b.id===id) : CLICK_UPS_CFG.find(u=>u.id===id);
             const owned = type === 'building' ? (state.buildings[id] || 0) : (state.clickUps[id] || 0);
-
             if (mode === 'max') {
                 let total = 0, count = 0;
                 let p = Math.floor(cfg.cost * Math.pow(cfg.mult, owned));
-                while (total + p <= state.milk && count < 10000) {
-                    total += p; count++;
-                    p = Math.floor(cfg.cost * Math.pow(cfg.mult, owned + count));
-                }
-                if (count === 0) {
-                    return { qty: 1, price: Math.floor(cfg.cost * Math.pow(cfg.mult, owned)) };
-                }
+                while (total + p <= state.milk && count < 10000) { total += p; count++; p = Math.floor(cfg.cost * Math.pow(cfg.mult, owned + count)); }
+                if (count === 0) return { qty: 1, price: Math.floor(cfg.cost * Math.pow(cfg.mult, owned)) };
                 return { qty: count, price: total };
             } else {
                 let total = 0;
                 for (let i = 0; i < mode; i++) total += Math.floor(cfg.cost * Math.pow(cfg.mult, owned + i));
                 return { qty: mode, price: total };
             }
+        }
+
+        // ============================ СКИНЫ И МАГАЗИН ============================
+        function applySkin(skinId) {
+            const skin = CLIENT_SKINS.find(s => s.id === skinId) || CLIENT_SKINS[0];
+            cowBtn.textContent = skin.icon;
+            cowBtn.style.filter = skin.color ? skin.color + ' drop-shadow(0 6px 14px rgba(0,0,0,0.55))' : 'drop-shadow(0 6px 14px rgba(0,0,0,0.55))';
+        }
+
+        function openShop() {
+            const modal = h('div', { class: 'cow-modal', style: 'display: flex;' });
+            const box = h('div', { class: 'cow-modal-box' });
+            const title = h('h3', { text: 'Магазин и Кейсы', style: 'color: var(--gold); margin-bottom: 15px;' });
+            const tabBox = h('div', { class: 'cow-tabs', style: 'margin-bottom: 15px;' });
+            const btnCases = h('button', { class: 'cow-tab on', text: '📦 Кейсы' });
+            const btnSkins = h('button', { class: 'cow-tab', text: '🎨 Скины' });
+            tabBox.append(btnCases, btnSkins);
+            const content = h('div', { style: 'max-height: 400px; overflow-y: auto; padding-right: 5px;' });
+            const closeBtn = h('button', { class: 'btn', text: 'Закрыть', style: 'margin-top: 15px; width: 100%;', onclick: () => modal.remove() });
+
+            function renderCasesTab() {
+                content.innerHTML = '';
+                const nextTime = state.nextCaseTime || 0;
+                const isDailyReady = Date.now() >= nextTime;
+                content.append(h('div', { class: 'cow-up', style: 'flex-direction: column; align-items: flex-start;' },
+                    h('div', { class: 'cow-up-name', text: 'Ежедневный кейс' }),
+                    h('div', { class: 'cow-up-desc', text: isDailyReady ? 'Доступен!' : 'Ждите 00:00 МСК' }),
+                    h('button', { class: 'btn ' + (isDailyReady ? 'on' : ''), text: isDailyReady ? 'Забрать кейс' : 'Недоступно', style: 'margin-top: 10px; width: 100%;', onclick: async () => {
+                        if (!isDailyReady) return;
+                        const res = await serverRequest('/api/cow/claim-daily', { method: 'POST', body: '{}' });
+                        if (res.success) { state = res.state; updateHeader(); renderCasesTab(); showToast('📦 Получен кейс!'); } else showToast(res.error);
+                    }})
+                ));
+                content.append(h('div', { class: 'cow-up', style: 'flex-direction: column; align-items: flex-start; margin-top: 10px;' },
+                    h('div', { class: 'cow-up-name', text: 'Купить кейс' }),
+                    h('div', { class: 'cow-up-desc', text: 'Стоимость: 50 💎' }),
+                    h('button', { class: 'btn', text: 'Купить', style: 'margin-top: 10px; width: 100%;', onclick: async () => {
+                        const res = await serverRequest('/api/cow/shop', { method: 'POST', body: JSON.stringify({ action: 'buy_case' }) });
+                        if (res.success) { state = res.state; updateHeader(); renderCasesTab(); showToast('📦 Кейс куплен!'); } else showToast(res.error);
+                    }})
+                ));
+                content.append(h('div', { class: 'cow-up', style: 'flex-direction: column; align-items: center; margin-top: 10px; background: rgba(243,201,105,0.1);' },
+                    h('div', { class: 'cow-up-name', text: 'У вас: ' + (state.cases || 0) + ' 📦' }),
+                    h('button', { class: 'btn on', text: 'Открыть кейс', style: 'margin-top: 10px; width: 100%; font-size: 18px;', onclick: () => {
+                        if (state.cases > 0) { modal.remove(); startRoulette(); } else showToast('Нет кейсов');
+                    }})
+                ));
+            }
+
+            function renderSkinsTab() {
+                content.innerHTML = '';
+                const inv = state.unlockedSkins || ['normal'];
+                for (const s of CLIENT_SKINS) {
+                    const isUnlocked = inv.includes(s.id);
+                    const isEquipped = state.currentSkin === s.id;
+                    const skinBonus = SKIN_BONUSES[s.id];
+                    const bonusText = skinBonus ? skinBonus.desc : 'Без бонуса';
+
+                    const card = h('div', { class: 'cow-up' });
+                    card.append(
+                        h('div', { class: 'cow-up-icon', text: s.icon, style: s.color ? `filter: ${s.color}` : '' }),
+                        h('div', { class: 'cow-up-info' },
+                            h('div', { class: 'cow-up-name', text: s.name }),
+                            h('div', { class: 'cow-up-desc', text: s.rarity.toUpperCase() + ' · ' + bonusText }),
+                            h('div', { class: 'cow-up-desc', text: isUnlocked ? '✓ В инвентаре' : `Цена: ${s.price} 💎`, style: 'margin-top: 2px;' })
+                        )
+                    );
+
+                    if (isEquipped) {
+                        card.append(h('div', { class: 'cow-up-right', text: '✓ Надето', style: 'color: #59d98e; font-weight: bold;' }));
+                    } else if (isUnlocked) {
+                        card.onclick = async () => {
+                            const res = await serverRequest('/api/cow/shop', { method: 'POST', body: JSON.stringify({ action: 'equip', itemId: s.id }) });
+                            if (res.success) { state = res.state; applySkin(s.id); renderSkinsTab(); updateHeader(); }
+                        };
+                        card.append(h('div', { class: 'cow-up-right', text: 'Надеть', style: 'color: var(--gold);' }));
+                    } else {
+                        card.onclick = async () => {
+                            const res = await serverRequest('/api/cow/shop', { method: 'POST', body: JSON.stringify({ action: 'buy_skin', itemId: s.id }) });
+                            if (res.success) { state = res.state; updateHeader(); renderSkinsTab(); showToast('Скин куплен!'); }
+                            else showToast(res.error);
+                        };
+                        card.append(h('div', { class: 'cow-up-right', text: s.price + ' 💎', style: 'color: var(--gold);' }));
+                    }
+                    content.append(card);
+                }
+            }
+
+            btnCases.onclick = () => { btnCases.classList.add('on'); btnSkins.classList.remove('on'); renderCasesTab(); };
+            btnSkins.onclick = () => { btnSkins.classList.add('on'); btnCases.classList.remove('on'); renderSkinsTab(); };
+            box.append(title, tabBox, content, closeBtn);
+            modal.append(box);
+            root.append(modal);
+            renderCasesTab();
+        }
+
+        function startRoulette() {
+            serverRequest('/api/cow/open-case', { method: 'POST', body: '{}' }).then(res => {
+                if (!res || !res.success) return showToast(res.error || 'Ошибка');
+                const wonSkin = res.skin;
+                state = res.state;
+                const items = [];
+                const winIndex = 40;
+                for (let i = 0; i < 50; i++) {
+                    if (i === winIndex) items.push(wonSkin);
+                    else items.push(CLIENT_SKINS[Math.floor(Math.random() * CLIENT_SKINS.length)]);
+                }
+                const modal = h('div', { class: 'cow-modal', style: 'display: flex;' });
+                const box = h('div', { class: 'cow-modal-box' });
+                const track = h('div', { class: 'cs-roulette-track' });
+                const wrapEl = h('div', { class: 'cs-roulette-wrap' }, track, h('div', { class: 'cs-pointer' }));
+                items.forEach(item => track.append(h('div', { class: `cs-item rarity-${item.rarity}`, text: item.icon })));
+                const resultEl = h('h3', { text: 'Открываем...', style: 'color: var(--gold); margin-top: 20px; min-height: 28px;' });
+                const closeBtn = h('button', { class: 'btn on', text: 'Забрать', style: 'margin-top: 20px; width: 100%; display: none;', onclick: () => {
+                    modal.remove(); applySkin(state.currentSkin); updateHeader(); api.refreshCards();
+                }});
+                box.append(h('h3', { text: 'Открытие кейса', style: 'color: var(--text);' }), wrapEl, resultEl, closeBtn);
+                modal.append(box); root.append(modal);
+                const itemWidth = 100, containerWidth = 500;
+                const targetX = (winIndex * itemWidth) - (containerWidth / 2) + (itemWidth / 2);
+                const randomOffset = (Math.random() - 0.5) * 60;
+                track.style.transform = `translateX(0px)`; track.style.transition = 'none'; void track.offsetWidth;
+                requestAnimationFrame(() => { track.style.transition = 'transform 5s cubic-bezier(0.15, 1, 0.3, 1)'; track.style.transform = `translateX(-${targetX + randomOffset}px)`; });
+                setTimeout(() => {
+                    if (res.isDuplicate) resultEl.innerHTML = `Дубликат скина!<br><span style="font-size: 24px; color: #00ffff;">+${res.crystalsGained} 💎</span>`;
+                    else resultEl.innerHTML = `Новый скин:<br><span style="font-size: 24px; color: #fff;">${wonSkin.name}</span>`;
+                    closeBtn.style.display = 'block';
+                    if (navigator.vibrate) { try { navigator.vibrate([100, 50, 100]); } catch(e){} }
+                }, 5200);
+            });
+        }
+
+        // ============================ МОЛОЧНЫЙ СЛИЗЕНЬ ============================
+        let slimeTimer = null, slimeEl = null, slimeEscapeTimer = null;
+        function scheduleSlime() {
+            clearTimeout(slimeTimer);
+            slimeTimer = setTimeout(showSlime, 45000 + Math.random() * 45000);
+        }
+        function showSlime() {
+            if (slimeEl || !mounted) return;
+            const left = 10 + Math.random() * 70;
+            const top = 10 + Math.random() * 70;
+            slimeEl = h('div', { class: 'cow-slime', text: '🪱', style: `left:${left}%; top:${top}%;`, onclick: onSlimeClick });
+            stageEl.append(slimeEl);
+            slimeEscapeTimer = setTimeout(async () => {
+                if (slimeEl) {
+                    slimeEl.remove(); slimeEl = null;
+                    showToast('🪱 Слизень съел 5% молока!');
+                    const res = await serverRequest('/api/cow/slime/escape', { method: 'POST', body: '{}' });
+                    if (res && res.success) { state.milk = res.state.milk; updateHeader(); }
+                    scheduleSlime();
+                }
+            }, 7000);
+        }
+        async function onSlimeClick(e) {
+            if (!slimeEl) return; e.stopPropagation();
+            slimeEl.remove(); slimeEl = null; clearTimeout(slimeEscapeTimer);
+            const res = await serverRequest('/api/cow/slime', { method: 'POST', body: '{}' });
+            if (res && res.success) {
+                state = res.state; updateHeader(); refreshVisibleCards();
+                if (res.rewardMilk > 0) { spawnFloat('+' + cowFmtNum(res.rewardMilk) + ' 🥛', e, '#55ff55', 24); showToast('🪱 Слизень пойман! Бонус молока!'); }
+                else { spawnFloat('+' + res.rewardCrystals + ' 💎', e, '#00ffff', 24); showToast('🪱 Слизень пойман! Бонус кристаллов!'); }
+            }
+            scheduleSlime();
         }
 
         // ============================ UI ============================
@@ -2037,6 +2237,11 @@ const CowClicker = {
             milkCountEl.textContent = cowFmtNum(state.milk);
             mpsEl.textContent = cowFmtNum(getLocalMps()) + ' / сек';
             clickPowerEl.textContent = '+' + cowFmtNum(getLocalClickPower()) + ' / клик';
+            crystalsEl.textContent = '💎 ' + cowFmtNum(state.crystals || 0);
+            casesEl.textContent = '📦 ' + cowFmtNum(state.cases || 0);
+            const isDailyReady = Date.now() >= (state.nextCaseTime || 0);
+            if ((state.cases || 0) > 0 || isDailyReady) caseBtn.classList.add('ready');
+            else caseBtn.classList.remove('ready');
         }
 
         function makeBuyCard(cfg, type) {
@@ -2044,45 +2249,38 @@ const CowClicker = {
             const priceEl = h('div', { class: 'cow-up-price' });
             const descEl = h('div', { class: 'cow-up-desc' });
             const countEl = h('div', { class: 'cow-up-count' });
-            card.append(
-                h('div', { class: 'cow-up-icon', text: cfg.icon }),
-                h('div', { class: 'cow-up-info' }, h('div', { class: 'cow-up-name', text: cfg.name }), descEl),
-                h('div', { class: 'cow-up-right' }, priceEl, countEl)
-            );
-
+            card.append(h('div', { class: 'cow-up-icon', text: cfg.icon }), h('div', { class: 'cow-up-info' }, h('div', { class: 'cow-up-name', text: cfg.name }), descEl), h('div', { class: 'cow-up-right' }, priceEl, countEl));
             card.refresh = () => {
                 const owned = type === 'building' ? (state.buildings[cfg.id] || 0) : (type === 'clickUp' ? (state.clickUps[cfg.id] || 0) : !!state.multipliers[cfg.id]);
-                let desc = cfg.desc || '';
-                let price = cfg.cost;
-
+                let desc = cfg.desc || '', price = cfg.cost;
                 if (type !== 'mult') {
                     const info = getBuyInfo(type, cfg.id, buyMode);
                     price = info.price;
-
                     if (type === 'building') {
                         let mm = 1; for (const t of [25, 50, 100, 200, 300, 400, 500]) if (owned >= t) mm *= 2;
-                        desc = '+' + cowFmtNum(cfg.prod * mm) + ' / сек' + (mm > 1 ? ' · вехи ×' + mm : '');
-                    } else if (type === 'clickUp') {
-                        desc = cfg.desc;
+                        const singleProd = cfg.prod * mm, totalProd = owned * singleProd;
+                        desc = '+' + cowFmtNum(singleProd) + ' / сек (одна)';
+                        if (owned > 0) desc += ' · всего: ' + cowFmtNum(totalProd) + ' / сек';
+                        if (mm > 1) desc += ' · вехи ×' + mm;
                     }
                 }
-
                 descEl.textContent = desc;
                 if (owned === true) {
                     priceEl.textContent = '✓ куплено'; countEl.textContent = '';
                     card.classList.add('owned'); card.classList.remove('locked');
                 } else {
                     priceEl.textContent = cowFmtNum(price) + ' 🥛';
-                    let countText = '×' + owned;
-                    if (buyMode === 'max' && type !== 'mult') countText += ' (+' + getBuyInfo(type, cfg.id, buyMode).qty + ')';
-                    else if (buyMode > 1 && type !== 'mult') countText += ' (+' + buyMode + ')';
+                    let countText = '';
+                    if (type !== 'mult') {
+                        countText = '×' + owned;
+                        if (buyMode === 'max') countText += ' (+' + getBuyInfo(type, cfg.id, buyMode).qty + ')';
+                        else if (buyMode > 1) countText += ' (+' + buyMode + ')';
+                    }
                     countEl.textContent = countText;
-
                     card.classList.remove('owned');
                     card.classList.toggle('locked', state.milk < price);
                 }
             };
-
             card.onclick = () => {
                 const owned = type === 'building' ? (state.buildings[cfg.id] || 0) : (type === 'clickUp' ? (state.clickUps[cfg.id] || 0) : !!state.multipliers[cfg.id]);
                 if (owned === true) return;
@@ -2095,44 +2293,24 @@ const CowClicker = {
         }
 
         function refreshVisibleCards() { for (const c of currentCards) if (c.refresh) c.refresh(); }
-
         function makeBuyModeRow() {
             const row = h('div', { class: 'cow-buy-mode' });
-            const modes = [1, 10, 100, 'max'];
-            for (const n of modes) {
-                const label = n === 'max' ? 'MAX' : '×' + n;
-                row.append(h('button', {
-                    class: 'cow-tab' + (buyMode === n ? ' on' : ''),
-                    text: label,
-                    onclick: () => { buyMode = n; store.set('cow.buyMode', n); renderTabs(); }
-                }));
-            }
+            for (const n of [1, 10, 100, 'max']) row.append(h('button', { class: 'cow-tab' + (buyMode === n ? ' on' : ''), text: n === 'max' ? 'MAX' : '×' + n, onclick: () => { buyMode = n; store.set('cow.buyMode', n); renderTabs(); } }));
             return row;
         }
 
         function renderTabs() {
             for (const t of tabs) tabBtns[t.id].classList.toggle('on', t.id === currentTab);
             contentEl.innerHTML = ''; currentCards = [];
-
             if (currentTab === 'clickups') {
                 contentEl.append(makeBuyModeRow());
-                for (const u of CLICK_UPS_CFG) {
-                    currentCards.push(makeBuyCard({ ...u, desc: '+'+u.effect+' за клик' }, 'clickUp'));
-                }
-            }
-            else if (currentTab === 'buildings') {
+                for (const u of CLICK_UPS_CFG) currentCards.push(makeBuyCard({ ...u, desc: '+'+u.effect+' за клик' }, 'clickUp'));
+            } else if (currentTab === 'buildings') {
                 contentEl.append(makeBuyModeRow());
-                for (const b of BUILDINGS_CFG) {
-                    currentCards.push(makeBuyCard(b, 'building'));
-                }
-            }
-            else if (currentTab === 'mults') {
-                for (const m of MULTS_CFG) {
-                    const card = makeBuyCard({ ...m, desc: '×' + m.factor + ' ко всему производству' }, 'mult');
-                    currentCards.push(card);
-                }
-            }
-            else if (currentTab === 'achievements') {
+                for (const b of BUILDINGS_CFG) currentCards.push(makeBuyCard(b, 'building'));
+            } else if (currentTab === 'mults') {
+                for (const m of MULTS_CFG) currentCards.push(makeBuyCard({ ...m, desc: '×' + m.factor + ' ко всему производству' }, 'mult'));
+            } else if (currentTab === 'achievements') {
                 let bns = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) bns += a.bonus;
                 contentEl.append(h('div', { style: 'padding: 10px; margin-bottom: 8px; text-align: center; color: #59d98e; font-weight: 800; background: rgba(89,217,142,0.08); border-radius: 8px;', text: 'Бонус к производству: +' + Math.round(bns * 100) + '%' }));
                 for (const a of ACH_CFG) {
@@ -2143,8 +2321,7 @@ const CowClicker = {
                         h('div', { class: 'cow-ach-bonus', text: '+' + Math.round(a.bonus * 100) + '%' })
                     ));
                 }
-            }
-            else if (currentTab === 'prestige') {
+            } else if (currentTab === 'prestige') {
                 const cost = Math.floor(5e7 * Math.pow(5, state.prestigeLevel));
                 const can = state.milk >= cost;
                 contentEl.append(h('div', { class: 'cow-prestige-box' },
@@ -2152,13 +2329,11 @@ const CowClicker = {
                     h('div', { style: 'font-size: 16px; font-weight: 800; color: #f3c969; margin-bottom: 8px;' }, 'Престиж ' + state.prestigeLevel),
                     h('div', { style: 'font-size: 12px; color: #b8a082; line-height: 1.7; margin-bottom: 14px;' },
                         'Сброс прогресса. Останется только totalMilk и достижения.', h('br'),
+                        'Вы получите: ' + (state.prestigeLevel + 1) * 2 + ' 📦 кейсов', h('br'),
                         'Сейчас: ×' + Math.pow(1.5, state.prestigeLevel).toFixed(2) + ' → станет: ×' + Math.pow(1.5, state.prestigeLevel + 1).toFixed(2), h('br'),
                         'Стоимость: ' + cowFmtNum(cost) + ' 🥛'
                     ),
-                    h('button', {
-                        class: 'cow-tab' + (can ? ' on' : ''), style: 'padding: 12px; width: 100%;' + (can ? '' : ' opacity: 0.5; cursor: not-allowed;'),
-                        text: can ? '⭐ Сделать престиж' : 'Недостаточно молока', onclick: can ? doPrestige : null
-                    })
+                    h('button', { class: 'cow-tab' + (can ? ' on' : ''), style: 'padding: 12px; width: 100%;' + (can ? '' : ' opacity: 0.5; cursor: not-allowed;'), text: can ? '⭐ Сделать престиж' : 'Недостаточно молока', onclick: can ? doPrestige : null })
                 ));
             }
             contentEl.append(...currentCards);
@@ -2178,63 +2353,104 @@ const CowClicker = {
             setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 500); }, 3000);
         }
 
+        // ============================ КЛИКИ ============================
+        function onCowClick(e) {
+            const p = getLocalClickPower();
+            state.milk += p; state.totalMilk += p;
+            cowBtn.classList.remove('clicked'); void cowBtn.offsetWidth; cowBtn.classList.add('clicked');
+            spawnFloat('+' + cowFmtNum(p), e, '#f3c969', 20);
+            updateHeader();
+            pendingClicks++;
+            if (!clickTimeout) clickTimeout = setTimeout(sendClicks, 1000);
+        }
+
+        async function sendClicks() {
+            clickTimeout = null;
+            if (pendingClicks === 0 || isSyncing) return;
+            const toSend = pendingClicks;
+            pendingClicks = 0;
+            isSyncing = true;
+            // ОТПРАВЛЯЕМ НИК ВМЕСТЕ С КЛИКАМИ
+            const res = await serverRequest('/api/cow/click', { method: 'POST', body: JSON.stringify({ clicks: toSend, nickname: getPlayerName() }) });
+            isSyncing = false;
+            if (res && res.success) {
+                state.milk = res.milk; state.totalMilk = res.totalMilk;
+                updateHeader(); refreshVisibleCards();
+            } else syncState();
+        }
+
+        // ============================ СИНК И ПОКУПКИ ============================
+        async function buyUpgrade(type, id, qty) {
+            const res = await serverRequest('/api/cow/buy', { method: 'POST', body: JSON.stringify({ type, id, qty }) });
+            if (res && res.success) { state.milk = res.milk; syncState(); } else showToast(res.error || 'Ошибка покупки');
+        }
+
+        async function doPrestige() {
+            if (!confirm('Вы уверены? Весь прогресс (кроме общего молока и достижений) сбросится.')) return;
+            const res = await serverRequest('/api/cow/prestige', { method: 'POST', body: '{}' });
+            if (res && res.success) {
+                state = res.state; applySkin(state.currentSkin || 'normal'); renderTabs();
+                showToast(`⭐ Престиж! Вы получили ${res.casesReward} 📦`);
+            }
+        }
+
+        async function syncState() {
+            const res = await serverRequest('/api/cow/sync', { method: 'POST', body: JSON.stringify({ nickname: getPlayerName() }) });
+            if (res && res.success) {
+                state = res.state;
+                updateHeader(); refreshVisibleCards(); applySkin(state.currentSkin || 'normal');
+                store.set('cow.state', { totalMilk: state.totalMilk, prestigeLevel: state.prestigeLevel });
+                api.refreshCards();
+            }
+        }
+
         // ============================ ТИКЕР ============================
-        let mounted = true, lastTick = Date.now(), rafId = null;
-        let lastSync = 0;
+        let mounted = true, lastTick = Date.now(), rafId = null, lastSync = 0;
 
         function tick() {
             if (!mounted) return;
-
-            if (document.hidden) {
-                if (rafId) cancelAnimationFrame(rafId);
-                rafId = null;
-                return;
-            }
-
+            if (document.hidden) { if (rafId) cancelAnimationFrame(rafId); rafId = null; return; }
             const now = Date.now();
             const dt = Math.max(0, Math.min(60, (now - lastTick) / 1000));
             lastTick = now;
-
             const mps = getLocalMps();
             if (mps > 0) { state.milk += mps * dt; state.totalMilk += mps * dt; }
             updateHeader();
-
-            if (now - lastSync > 10000) {
-                lastSync = now;
-                syncState();
-            }
+            if (now - lastSync > 10000) { lastSync = now; syncState(); }
             if (now % 1000 < 20) refreshVisibleCards();
-
             rafId = requestAnimationFrame(tick);
         }
 
         // ============================ СТАРТ ============================
         const onVisibilityChange = () => {
-            if (!document.hidden && mounted && !rafId) {
-                lastTick = Date.now();
-                rafId = requestAnimationFrame(tick);
-            }
+            if (!document.hidden && mounted && !rafId) { lastTick = Date.now(); rafId = requestAnimationFrame(tick); }
         };
         document.addEventListener('visibilitychange', onVisibilityChange);
 
+        applySkin(state.currentSkin || 'normal');
         syncState();
         lastTick = Date.now();
         rafId = requestAnimationFrame(tick);
+        scheduleSlime(); // ЗАПУСК СЛИЗНЯ
 
         return {
             onShow() {
                 mounted = true; lastTick = Date.now();
                 if (!rafId) rafId = requestAnimationFrame(tick);
                 syncState();
+                if (!slimeEl) scheduleSlime(); // ВОЗОБНОВИТЬ СЛИЗНЯ
             },
             onHide() {
                 mounted = false; if (rafId) cancelAnimationFrame(rafId); rafId = null;
                 if (pendingClicks > 0) sendClicks();
+                clearTimeout(slimeTimer); clearTimeout(slimeEscapeTimer);
+                if (slimeEl) { slimeEl.remove(); slimeEl = null; }
             },
             destroy() {
                 mounted = false;
                 if (rafId) cancelAnimationFrame(rafId);
                 document.removeEventListener('visibilitychange', onVisibilityChange);
+                clearTimeout(slimeTimer); clearTimeout(slimeEscapeTimer);
             }
         };
     }
