@@ -106,6 +106,25 @@ const COW_SKINS = [
     { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 1.5,  price: 1500 },
     { id: 'divine',  name: 'Божественная',  icon: '🐮', rarity: 'legendary', chance: 1.5,  price: 1500 }
 ];
+// Бонусы от скинов
+const SKIN_BONUSES = {
+    normal:  { type: 'mps',      value: 0.02, desc: '+2% к производству' },
+    cool:    { type: 'cp',       value: 0.03, desc: '+3% к силе клика' },
+    pink:    { type: 'crystals', value: 0.05, desc: '+5% к кристаллам' },
+    green:   { type: 'slime',    value: 0.10, desc: '+10% к награде слизня' },
+    golden:  { type: 'mps',      value: 0.08, desc: '+8% к производству' },
+    purple:  { type: 'cp',       value: 0.08, desc: '+8% к силе клика' },
+    ghost:   { type: 'mps',      value: 0.15, desc: '+15% к производству' },
+    cyber:   { type: 'cp',       value: 0.15, desc: '+15% к силе клика' },
+    diamond: { type: 'mps',      value: 0.25, desc: '+25% к производству' },
+    divine:  { type: 'cp',       value: 0.25, desc: '+25% к силе клика' }
+};
+
+function getSkinBonus(state, type) {
+    const bonus = SKIN_BONUSES[state.currentSkin];
+    if (!bonus || bonus.type !== type) return 1;
+    return 1 + bonus.value;
+}
 
 const DUP_CRYSTALS = { common: 5, rare: 20, epic: 60, legendary: 250 };
 
@@ -125,6 +144,11 @@ function calcCowMath(s) {
     for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
     gMult *= (1 + achBonus);
+    
+    // Применяем бонус от скина
+    const mpsBonus = getSkinBonus(s, 'mps');
+    const cpBonus = getSkinBonus(s, 'cp');
+
     let mps = 0;
     for (const b of COW_CONFIG.buildings) {
         const owned = s.buildings[b.id] || 0;
@@ -133,9 +157,13 @@ function calcCowMath(s) {
         mps += owned * b.prod * mileMult;
     }
     mps *= gMult;
+    mps *= mpsBonus; // <--- Бонус скина к MPS
+
     let cp = 1;
     for (const u of COW_CONFIG.clickUps) cp += (s.clickUps[u.id] || 0) * u.effect;
     cp *= gMult;
+    cp *= cpBonus; // <--- Бонус скина к Клику
+
     return { mps, cp };
 }
 
@@ -624,7 +652,10 @@ app.post('/api/cow/open-case', async (req, res) => {
     let crystalsGained = 0;
     if (state.unlockedSkins.includes(selectedSkin.id)) {
         isDuplicate = true;
-        crystalsGained = DUP_CRYSTALS[selectedSkin.rarity] || 0;
+        let baseCrystals = DUP_CRYSTALS[selectedSkin.rarity] || 0;
+        // Бонус от скина к кристаллам
+        const crystalBonus = getSkinBonus(state, 'crystals');
+        crystalsGained = Math.floor(baseCrystals * crystalBonus);
         state.crystals += crystalsGained;
     } else {
         state.unlockedSkins.push(selectedSkin.id);
@@ -669,16 +700,18 @@ app.post('/api/cow/slime', async (req, res) => {
     }
 
     state.lastSlimeClick = now;
-    const { mps } = calcCowMath(state);
+        const { mps } = calcCowMath(state);
     let rewardMilk = 0;
     let rewardCrystals = 0;
     
     if (Math.random() > 0.5) {
-        rewardMilk = mps * 120;
+        const slimeBonus = getSkinBonus(state, 'slime');
+        rewardMilk = Math.floor(mps * 120 * slimeBonus);
         state.milk += rewardMilk;
         state.totalMilk += rewardMilk;
     } else {
-        rewardCrystals = 10;
+        const crystalBonus = getSkinBonus(state, 'crystals');
+        rewardCrystals = Math.floor(10 * crystalBonus);
         state.crystals += rewardCrystals;
     }
 
