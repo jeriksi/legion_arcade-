@@ -81,6 +81,14 @@ const COW_CONFIG = {
     prestigeStep: 5,
     prestigeMult: 1.5,
 };
+// Добавьте это внутрь COW_CONFIG или рядом с ним
+const COW_SKINS = [
+    { id: 'normal',   name: 'Обычная',   icon: '🐄', rarity: 'common', chance: 60 },
+    { id: 'golden',   name: 'Золотая',   icon: '🐄', rarity: 'rare',   chance: 25, color: '#ffd700' },
+    { id: 'alien',    name: 'Космическая', icon: '👽', rarity: 'rare',   chance: 10, color: '#00ffcc' },
+    { id: 'ghost',    name: 'Призрачная', icon: '👻', rarity: 'epic',   chance: 4,  color: '#ffffff' },
+    { id: 'diamond',  name: 'Алмазная',  icon: '🐄', rarity: 'legendary', chance: 1, color: '#00ffff' }
+];
 
 const cowStates = new Map();
 
@@ -123,7 +131,18 @@ function tickCow(s) {
 async function getCowState(playerId) {
     if (cowStates.has(playerId)) return cowStates.get(playerId);
     const raw = await redis('GET', 'cow:' + playerId);
-    let state = raw ? JSON.parse(raw) : { milk: 0, totalMilk: 0, lastUpdate: Date.now(), clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0 };
+    
+    // Добавили lastCase, unlockedSkins и currentSkin
+    let state = raw ? JSON.parse(raw) : { 
+        milk: 0, totalMilk: 0, lastUpdate: Date.now(), 
+        clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
+        lastCase: 0, unlockedSkins: ['normal'], currentSkin: 'normal'
+    };
+    
+    // Защита для старых сохранений
+    if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
+    if (!state.currentSkin) state.currentSkin = 'normal';
+
     tickCow(state);
     cowStates.set(playerId, state);
     return state;
@@ -664,6 +683,61 @@ app.post('/api/cow/buy', async (req, res) => {
     saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, milk: state.milk });
+});
+
+// ============================================================
+// API КЕЙСОВ И СКИНОВ
+// ============================================================
+app.post('/api/cow/case', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+
+    const state = await getCowState(playerId);
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+
+    if (now - state.lastCase < DAY) {
+        return res.status(400).json({ success: false, error: 'Кейс еще не готов' });
+    }
+
+    // Роллим скин на сервере (чтобы нельзя было подделать)
+    let roll = Math.random() * 100;
+    let selectedSkin = COW_SKINS[0]; // По умолчанию обычная
+    let currentChance = 0;
+
+    for (const skin of COW_SKINS) {
+        currentChance += skin.chance;
+        if (roll <= currentChance) {
+            selectedSkin = skin;
+            break;
+        }
+    }
+
+    // Если выпал скин, которого нет в инвентаре — добавляем
+    if (!state.unlockedSkins.includes(selectedSkin.id)) {
+        state.unlockedSkins.push(selectedSkin.id);
+    }
+
+    state.lastCase = now;
+    saveCowState(playerId);
+
+    res.json({ success: true, skin: selectedSkin, state });
+});
+
+app.post('/api/cow/equip', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+
+    const { skinId } = req.body;
+    const state = await getCowState(playerId);
+
+    if (!state.unlockedSkins.includes(skinId)) {
+        return res.status(400).json({ success: false, error: 'Этот скин не разблокирован' });
+    }
+
+    state.currentSkin = skinId;
+    saveCowState(playerId);
+    res.json({ success: true, state });
 });
 
 // ============================================================
