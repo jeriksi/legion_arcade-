@@ -5,35 +5,43 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// ДОВЕРИЕ К ОБРАТНОМУ ПРОКСИ
+// БАЗА ДАННЫХ (REDIS / UPSTASH) - ВЫНЕСЕНО НАВЕРХ ДЛЯ УДОБСТВА
 // ============================================================
-const TRUST_PROXY = process.env.TRUST_PROXY === '1';
-app.set('trust proxy', TRUST_PROXY ? 1 : false);
+const UPSTASH_URL = process.env.UPSTASH_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
+let isLeaderboardDirty = false;
+
+async function redis(...args) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+    try {
+        const res = await fetch(UPSTASH_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(args)
+        });
+        if (!res.ok) { console.error('Redis HTTP', res.status); return null; }
+        const data = await res.json();
+        return data.result;
+    } catch (e) { console.error('Redis error:', e.message); return null; }
+}
+
+async function redisPipeline(commands) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+    try {
+        const res = await fetch(UPSTASH_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(commands)
+        });
+        return res.ok;
+    } catch (e) { return false; }
+}
 
 // ============================================================
-// КОНСТАНТЫ
+// 🌟 ЗДЕСЬ НАЧИНАЕТСЯ КОД МОЛОЧНОЙ ФЕРМЫ (КЛИКЕР) 🌟
 // ============================================================
-const MATCHMAKING_TIMEOUT = 30 * 1000;
-const DISCONNECT_TIMEOUT = 120 * 1000;
-const FINISHED_MATCH_TTL = 10 * 60 * 1000;
-const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
-const SESSION_TTL = 2 * 60 * 60 * 1000;
-const SESSION_CLEANUP_MS = 10 * 60 * 1000;
 
-const DRAW_HM_LIMIT = 30;
-const REPEAT_LIMIT = 3;
-
-const MAX_QUEUE = 500;
-const MAX_PLAYERS = 100000;
-const MAX_SESSIONS = 100000;
-const SESSION_RATE_WINDOW_MS = 60 * 1000;
-const SESSION_RATE_MAX = 20;
-
-const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000;
-
-// ============================================================
-// КОНФИГУРАЦИЯ КЛИКЕРА
-// ============================================================
+// КОНФИГУРАЦИЯ КЛИКЕРА (БАЛАНС)
 const COW_CONFIG = {
     clickUps: [
         { id: 'hands',   cost: 15,     effect: 1,      mult: 1.15 },
@@ -83,40 +91,28 @@ const COW_CONFIG = {
 };
 
 const COW_SKINS = [
-    // 🟢 Common — 60% шанс (по 15% на каждый)
+    // 🟢 Common — 60% шанс
     { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'cool',    name: 'Ледяная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'pink',    name: 'Розовая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'green',   name: 'Луговая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
-
-    // 🔵 Rare — 25% шанс (по 12.5% на каждый)
+    // 🔵 Rare — 25% шанс
     { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
     { id: 'purple',  name: 'Аметистовая',   icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
-
-    // 🟣 Epic — 12% шанс (по 6% на каждый)
+    // 🟣 Epic — 12% шанс
     { id: 'ghost',   name: 'Призрачная',    icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
     { id: 'cyber',   name: 'Кибер-корова',  icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
-
-    // 🟡 Legendary — 3% шанс (по 1.5% на каждый)
+    // 🟡 Legendary — 3% шанс
     { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 1.5,  price: 1500 },
     { id: 'divine',  name: 'Божественная',  icon: '🐮', rarity: 'legendary', chance: 1.5,  price: 1500 }
 ];
 
-// Сколько кристаллов дают за дубликат (сбалансировано по редкости)
-const DUP_CRYSTALS = { 
-    common: 5, 
-    rare: 20, 
-    epic: 60, 
-    legendary: 250 
-};
+const DUP_CRYSTALS = { common: 5, rare: 20, epic: 60, legendary: 250 };
 
 function getNextMidnightMSK() {
     const now = new Date();
-    // Переводим в МСК
     now.setUTCHours(now.getUTCHours() + 3);
-    // Ставим 00:00:00 следующего дня
     now.setUTCHours(24, 0, 0, 0);
-    // Возвращаем в UTC
     return now.getTime() - (3 * 60 * 60 * 1000);
 }
 
@@ -125,12 +121,10 @@ const cowStates = new Map();
 function calcCowMath(s) {
     let achBonus = 0;
     for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
-    
     let gMult = 1;
     for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
     gMult *= (1 + achBonus);
-
     let mps = 0;
     for (const b of COW_CONFIG.buildings) {
         const owned = s.buildings[b.id] || 0;
@@ -139,13 +133,9 @@ function calcCowMath(s) {
         mps += owned * b.prod * mileMult;
     }
     mps *= gMult;
-
     let cp = 1;
-    for (const u of COW_CONFIG.clickUps) {
-        cp += (s.clickUps[u.id] || 0) * u.effect;
-    }
+    for (const u of COW_CONFIG.clickUps) cp += (s.clickUps[u.id] || 0) * u.effect;
     cp *= gMult;
-
     return { mps, cp };
 }
 
@@ -161,17 +151,17 @@ function tickCow(s) {
 async function getCowState(playerId) {
     if (cowStates.has(playerId)) return cowStates.get(playerId);
     const raw = await redis('GET', 'cow:' + playerId);
-    
     let state = raw ? JSON.parse(raw) : { 
         milk: 0, totalMilk: 0, lastUpdate: Date.now(), 
         clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
         nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
-        crystals: 0, cases: 0
+        crystals: 0, cases: 0, lastSlimeClick: 0
     };
     if (state.crystals == null) state.crystals = 0;
     if (state.cases == null) state.cases = 0;
     if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
     if (!state.currentSkin) state.currentSkin = 'normal';
+    if (state.lastSlimeClick == null) state.lastSlimeClick = 0;
 
     tickCow(state);
     cowStates.set(playerId, state);
@@ -184,14 +174,32 @@ async function saveCowState(playerId) {
     await redis('SET', 'cow:' + playerId, JSON.stringify(s));
 }
 
-// Сброс в Redis раз в минуту
 setInterval(() => {
     for (const pid of cowStates.keys()) saveCowState(pid);
 }, 60000).unref?.();
 
 // ============================================================
-// БЕЛЫЙ СПИСОК ИГР
+// 🌟 КОНЕЦ БЛОКА КОНФИГУРАЦИИ КЛИКЕРА, ДАЛЬШЕ ОБЩИЕ НАСТРОЙКИ 🌟
 // ============================================================
+
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+app.set('trust proxy', TRUST_PROXY ? 1 : false);
+
+const MATCHMAKING_TIMEOUT = 30 * 1000;
+const DISCONNECT_TIMEOUT = 120 * 1000;
+const FINISHED_MATCH_TTL = 10 * 60 * 1000;
+const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
+const SESSION_TTL = 2 * 60 * 60 * 1000;
+const SESSION_CLEANUP_MS = 10 * 60 * 1000;
+const DRAW_HM_LIMIT = 30;
+const REPEAT_LIMIT = 3;
+const MAX_QUEUE = 500;
+const MAX_PLAYERS = 100000;
+const MAX_SESSIONS = 100000;
+const SESSION_RATE_WINDOW_MS = 60 * 1000;
+const SESSION_RATE_MAX = 20;
+const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000;
+
 const GAME_RULES = {
     'mines_easy':    { lower: true,  maxScore: 3600,    minSeconds: 2 },
     'mines_mid':     { lower: true,  maxScore: 3600,    minSeconds: 2 },
@@ -211,37 +219,23 @@ const GAME_RULES = {
     'cowclicker':    { lower: false, maxScore: 1e18, minSeconds: 60 },
 };
 
-// ============================================================
-// УТИЛИТЫ
-// ============================================================
 const nowMs = () => Date.now();
 const posKey = (pos) => pos.b.map(p => p || '.').join('') + '|' + pos.turn;
 
 function sanitizeNickname(n) {
-    return String(n || '')
-        .replace(/[<>&"'\x00-\x1f\x7f]/g, '')
-        .substring(0, 20)
-        .trim() || 'Аноним';
+    return String(n || '').replace(/[<>&"'\x00-\x1f\x7f]/g, '').substring(0, 20).trim() || 'Аноним';
 }
 
-// ============================================================
-// ХРАНИЛИЩА
-// ============================================================
 const players = new Map();
 const tokensToPlayers = new Map();
-
 const matches = {};
 const chessMatches = {};
 const matchmakingQueue = [];
 const chessQueue = [];
-
 const leaderboards = {};
 const gameSessions = new Map();
 const playerGameSessions = new Map();
 
-// ============================================================
-// АВТОРИЗАЦИЯ
-// ============================================================
 function getAuthedPlayerId(req) {
     const auth = req.headers.authorization;
     if (!auth || !auth.startsWith('Bearer ')) return null;
@@ -267,9 +261,6 @@ function cleanupInactivePlayers(thresholdMs) {
     return removed;
 }
 
-// ============================================================
-// MIDDLEWARE
-// ============================================================
 app.use((req, res, next) => {
     res.header('X-Content-Type-Options', 'nosniff');
     res.header('X-Frame-Options', 'DENY');
@@ -313,77 +304,28 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '32kb' }));
 
-// ============================================================
-// РЕГИСТРАЦИЯ ИГРОКА
-// ============================================================
 app.post('/api/player/register', async (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
     }
-    if (players.size >= MAX_PLAYERS) {
-        cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
-    }
-    if (players.size >= MAX_PLAYERS) {
-        return res.status(503).json({ success: false, error: 'Сервер перегружен' });
-    }
+    if (players.size >= MAX_PLAYERS) cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
+    if (players.size >= MAX_PLAYERS) return res.status(503).json({ success: false, error: 'Сервер перегружен' });
+    
     const playerId = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('hex');
     const now = nowMs();
     players.set(playerId, { token, createdAt: now, lastActiveAt: now });
     tokensToPlayers.set(token, playerId);
 
-    // Сохраняем в Redis для персистентности
     await redis('HSET', 'players_db', token, JSON.stringify({ playerId, createdAt: now, lastActiveAt: now }));
-
     res.json({ success: true, playerId, token });
 });
 
-setInterval(() => {
-    cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
-}, 60 * 60 * 1000).unref?.();
-
-// ============================================================
-// ЛИДЕРБОРД
-// ============================================================
-const UPSTASH_URL = process.env.UPSTASH_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
-let isLeaderboardDirty = false;
-
-async function redis(...args) {
-    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
-    try {
-        const res = await fetch(UPSTASH_URL, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(args)
-        });
-        if (!res.ok) { console.error('Redis HTTP', res.status); return null; }
-        const data = await res.json();
-        return data.result;
-    } catch (e) {
-        console.error('Redis error:', e.message);
-        return null;
-    }
-}
-
-async function redisPipeline(commands) {
-    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
-    try {
-        const res = await fetch(UPSTASH_URL, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(commands)
-        });
-        return res.ok;
-    } catch (e) { return false; }
-}
+setInterval(() => { cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL); }, 60 * 60 * 1000).unref?.();
 
 async function loadLeaderboardsFromDB() {
     if (!UPSTASH_URL) return;
-    console.log('Загрузка данных из Upstash...');
-
-    // Загружаем игроков
     const allPlayers = await redis('HGETALL', 'players_db');
     if (Array.isArray(allPlayers)) {
         for (let i = 0; i < allPlayers.length; i += 2) {
@@ -395,9 +337,6 @@ async function loadLeaderboardsFromDB() {
             } catch (e) {}
         }
     }
-    console.log(`Загружено игроков: ${players.size}`);
-
-    // Загружаем рекорды
     for (const gameId of Object.keys(GAME_RULES)) {
         const key = `lb:${gameId}`;
         const all = await redis('HGETALL', key);
@@ -406,13 +345,7 @@ async function loadLeaderboardsFromDB() {
             for (let i = 0; i < all.length; i += 2) {
                 try {
                     const v = JSON.parse(all[i + 1]);
-                    scores.push({
-                        playerId: all[i],
-                        nickname: v.nickname,
-                        score: v.score,
-                        losses: v.losses || 0,
-                        date: v.date || 0
-                    });
+                    scores.push({ playerId: all[i], nickname: v.nickname, score: v.score, losses: v.losses || 0, date: v.date || 0 });
                 } catch (_) {}
             }
             const isLower = GAME_RULES[gameId].lower;
@@ -420,12 +353,10 @@ async function loadLeaderboardsFromDB() {
             leaderboards[gameId] = scores.slice(0, 10);
         }
     }
-    console.log('Рекорды успешно загружены в память.');
 }
 
 async function flushLeaderboardsToDB() {
     if (!UPSTASH_URL || !isLeaderboardDirty) return;
-    console.log('Синхронизация рекордов с базой...');
     isLeaderboardDirty = false;
     const commands = [];
     for (const gameId of Object.keys(leaderboards)) {
@@ -434,59 +365,34 @@ async function flushLeaderboardsToDB() {
         const key = `lb:${gameId}`;
         commands.push(['DEL', key]);
         const hsetArgs = ['HSET', key];
-        for (const s of scores) {
-            hsetArgs.push(s.playerId, JSON.stringify({
-                nickname: s.nickname,
-                score: s.score,
-                losses: s.losses || 0,
-                date: s.date
-            }));
-        }
+        for (const s of scores) hsetArgs.push(s.playerId, JSON.stringify({ nickname: s.nickname, score: s.score, losses: s.losses || 0, date: s.date }));
         commands.push(hsetArgs);
     }
     if (commands.length > 0) await redisPipeline(commands);
-    console.log('Синхронизация завершена.');
 }
 
 setInterval(flushLeaderboardsToDB, 60 * 1000).unref?.();
 process.on('SIGTERM', async () => {
-    console.log('Сервер выключается, сохраняем данные...');
     await flushLeaderboardsToDB();
-    
-    // Сохраняем активных игроков кликера
-    for (const pid of cowStates.keys()) {
-        await saveCowState(pid);
-    }
-    
+    for (const pid of cowStates.keys()) await saveCowState(pid);
     process.exit(0);
 });
 
-// ============================================================
-// API СЕССИЙ (античит)
-// ============================================================
 app.post('/api/session/start', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
     const { gameId } = req.body || {};
     if (!gameId) return res.status(400).json({ success: false, error: 'Не указан gameId' });
     if (!GAME_RULES[gameId]) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
-
-    if (gameSessions.size >= MAX_SESSIONS) {
-        return res.status(503).json({ success: false, error: 'Сервер перегружен' });
-    }
-    if (!checkRateLimit('sess:' + playerId, SESSION_RATE_MAX, SESSION_RATE_WINDOW_MS)) {
-        return res.status(429).json({ success: false, error: 'Слишком часто. Подождите.' });
-    }
-
+    if (gameSessions.size >= MAX_SESSIONS) return res.status(503).json({ success: false, error: 'Сервер перегружен' });
+    if (!checkRateLimit('sess:' + playerId, SESSION_RATE_MAX, SESSION_RATE_WINDOW_MS)) return res.status(429).json({ success: false, error: 'Слишком часто. Подождите.' });
+    
     const pairKey = playerId + ':' + gameId;
     const oldSid = playerGameSessions.get(pairKey);
     if (oldSid) gameSessions.delete(oldSid);
-
     const sessionId = crypto.randomUUID();
     gameSessions.set(sessionId, { gameId, playerId, startTime: Date.now() });
     playerGameSessions.set(pairKey, sessionId);
-
     res.json({ success: true, sessionId });
 });
 
@@ -501,79 +407,43 @@ setInterval(() => {
     }
 }, SESSION_CLEANUP_MS).unref?.();
 
-// ============================================================
-// API ОЧКОВ
-// ============================================================
 app.post('/api/scores', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
     let { gameId, nickname, score, losses = 0, sessionId } = req.body || {};
     if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
-
     const rules = GAME_RULES[gameId];
     if (!rules) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
-
-    if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
-        return res.status(400).json({
-            success: false,
-            error: 'Рекорды этой игры учитываются сервером автоматически'
-        });
-    }
-    if (gameId === 'cowclicker') {
-        return res.status(400).json({ success: false, error: 'Рекорды кликера считаются автоматически на сервере' });
-    }
+    if (gameId === 'checkers-mp' || gameId === 'chess-mp' || gameId === 'cowclicker') return res.status(400).json({ success: false });
 
     nickname = sanitizeNickname(nickname);
     score = Math.floor(Number(score));
-    if (isNaN(score) || score < 0 || score > rules.maxScore) {
-        return res.status(400).json({ success: false, error: 'Неверный счёт' });
-    }
+    if (isNaN(score) || score < 0 || score > rules.maxScore) return res.status(400).json({ success: false, error: 'Неверный счёт' });
     losses = Math.max(0, Math.floor(Number(losses)) || 0);
 
-    if (!sessionId || typeof sessionId !== 'string') {
-        return res.status(400).json({ success: false, error: 'Нет sessionId' });
-    }
+    if (!sessionId || typeof sessionId !== 'string') return res.status(400).json({ success: false, error: 'Нет sessionId' });
     const session = gameSessions.get(sessionId);
-    if (!session) {
-        return res.status(400).json({ success: false, error: 'Сессия недействительна или уже использована' });
-    }
-    if (session.gameId !== gameId) {
+    if (!session) return res.status(400).json({ success: false, error: 'Сессия недействительна' });
+    if (session.gameId !== gameId || session.playerId !== playerId) {
         gameSessions.delete(sessionId);
-        const pk = session.playerId + ':' + session.gameId;
-        if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
-        return res.status(400).json({ success: false, error: 'Сессия от другой игры' });
-    }
-    if (session.playerId !== playerId) {
-        gameSessions.delete(sessionId);
-        const pk = session.playerId + ':' + session.gameId;
-        if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
-        return res.status(403).json({ success: false, error: 'Сессия другого игрока' });
+        return res.status(400).json({ success: false, error: 'Сессия не совпадает' });
     }
     gameSessions.delete(sessionId);
-    const pk = playerId + ':' + gameId;
-    if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
 
     const elapsedSeconds = (Date.now() - session.startTime) / 1000;
     let minSeconds = rules.minSeconds || 0;
-    if (gameId === 'tetris')            minSeconds = Math.max(minSeconds, score * 0.2);
+    if (gameId === 'tetris') minSeconds = Math.max(minSeconds, score * 0.2);
     else if (gameId.startsWith('snake_')) minSeconds = Math.max(minSeconds, score * 0.1);
-    else if (gameId === 'match3')       minSeconds = Math.max(minSeconds, score * 0.05);
+    else if (gameId === 'match3') minSeconds = Math.max(minSeconds, score * 0.05);
     else if (gameId.startsWith('pong_')) minSeconds = Math.max(minSeconds, score * 15);
-    
-    if (elapsedSeconds < minSeconds) {
-        return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
-    }
+    if (elapsedSeconds < minSeconds) return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     const lower = rules.lower;
     const existing = leaderboards[gameId].find(x => x.playerId === playerId);
-
     if (existing) {
         let updated = false;
-        if (lower ? score < existing.score : score > existing.score) {
-            existing.score = score; updated = true;
-        }
+        if (lower ? score < existing.score : score > existing.score) { existing.score = score; updated = true; }
         if (losses > (existing.losses || 0)) { existing.losses = losses; updated = true; }
         if (existing.nickname !== nickname) { existing.nickname = nickname; updated = true; }
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
@@ -581,59 +451,45 @@ app.post('/api/scores', (req, res) => {
         leaderboards[gameId].push({ playerId, nickname, score, losses, date: Date.now() });
         isLeaderboardDirty = true;
     }
-
     leaderboards[gameId].sort((a, b) => lower ? a.score - b.score : b.score - a.score);
     leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
-
     res.json({ success: true });
 });
 
 app.get('/api/scores/:gameId', (req, res) => {
     const gameId = req.params.gameId;
     if (!GAME_RULES[gameId]) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
-    const scores = (leaderboards[gameId] || []).slice(0, 10).map(s => ({
-        nickname: s.nickname,
-        score: s.score,
-        losses: s.losses || 0
-    }));
+    const scores = (leaderboards[gameId] || []).slice(0, 10).map(s => ({ nickname: s.nickname, score: s.score, losses: s.losses || 0 }));
     res.json({ success: true, scores });
 });
 
 // ============================================================
-// API КЛИКЕРА
+// 🌟 API МОЛОЧНОЙ ФЕРМЫ 🌟
 // ============================================================
 function syncCowLeaderboard(playerId, s) {
     const score = Math.floor(s.totalMilk);
     if (!leaderboards['cowclicker']) leaderboards['cowclicker'] = [];
     const lb = leaderboards['cowclicker'];
     const existing = lb.find(x => x.playerId === playerId);
-    
     const p = players.get(playerId);
     const currentNickname = (p && p.nickname) ? p.nickname : null;
 
     if (existing) {
         let updated = false;
         if (score > existing.score) { existing.score = score; updated = true; }
-        
-        // Не затираем нормальный ник на "Аноним"
-        if (currentNickname && existing.nickname !== currentNickname) { 
-            existing.nickname = currentNickname; 
-            updated = true; 
-        }
+        if (currentNickname && existing.nickname !== currentNickname) { existing.nickname = currentNickname; updated = true; }
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
-        // Если у игрока еще нет ника, ставим заглушку, но при следующем синке она исправится
         lb.push({ playerId, nickname: currentNickname || 'Загрузка...', score, losses: 0, date: Date.now() });
         isLeaderboardDirty = true;
     }
-    
     lb.sort((a, b) => b.score - a.score);
     leaderboards['cowclicker'] = lb.slice(0, 10);
 }
+
 app.post('/api/cow/sync', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-
     const rawNickname = req.body && req.body.nickname;
     if (rawNickname) {
         const p = players.get(playerId);
@@ -642,7 +498,6 @@ app.post('/api/cow/sync', async (req, res) => {
             await redis('HSET', 'players_db', p.token, JSON.stringify({ playerId, createdAt: p.createdAt, lastActiveAt: p.lastActiveAt, nickname: p.nickname }));
         }
     }
-
     const state = await getCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, state });
@@ -651,23 +506,28 @@ app.post('/api/cow/sync', async (req, res) => {
 app.post('/api/cow/click', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-    const { clicks } = req.body;
+    const { clicks, nickname } = req.body;
     if (typeof clicks !== 'number' || clicks <= 0) return res.status(400).json({ success: false });
+
+    if (nickname) {
+        const p = players.get(playerId);
+        if (p) {
+            p.nickname = sanitizeNickname(nickname);
+            redis('HSET', 'players_db', p.token, JSON.stringify({ playerId, createdAt: p.createdAt, lastActiveAt: p.lastActiveAt, nickname: p.nickname })).catch(()=>{});
+        }
+    }
 
     const state = await getCowState(playerId);
     const now = Date.now();
     const timeDiff = (now - (state.lastClickTime || now - 1000)) / 1000;
     
-    if (clicks > timeDiff * 20 + 5) {
-        return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
-    }
+    if (clicks > timeDiff * 20 + 5) return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
 
     const { cp } = calcCowMath(state);
     state.milk += clicks * cp;
     state.totalMilk += clicks * cp;
     state.lastClickTime = now;
     state.lastUpdate = now;
-
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, milk: state.milk, totalMilk: state.totalMilk });
 });
@@ -677,7 +537,6 @@ app.post('/api/cow/buy', async (req, res) => {
     if (!playerId) return res.status(401).json({ success: false });
     const { type, id } = req.body;
     let { qty } = req.body;
-    
     if (!qty || typeof qty !== 'number' || qty <= 0) return res.status(400).json({ success: false });
     
     const state = await getCowState(playerId);
@@ -690,25 +549,21 @@ app.post('/api/cow/buy', async (req, res) => {
         let price = 0;
         for (let i = 0; i < qty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
         price = Math.floor(price);
-        
         if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
         state.milk -= price;
         state.buildings[id] = owned + qty;
-    } 
-    else if (type === 'clickUp') {
+    } else if (type === 'clickUp') {
         const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
         if (!cfg) return res.status(400).json({ success: false });
         const owned = state.clickUps[id] || 0;
         let price = 0;
         for (let i = 0; i < qty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
         price = Math.floor(price);
-        
         if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
         state.milk -= price;
         state.clickUps[id] = owned + qty;
-    }
-    else if (type === 'mult') {
-        qty = 1; // Множители покупаются только по 1
+    } else if (type === 'mult') {
+        qty = 1;
         const cfg = COW_CONFIG.mults.find(m => m.id === id);
         if (!cfg || state.multipliers[id]) return res.status(400).json({ success: false });
         if (state.milk < cfg.cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
@@ -724,61 +579,37 @@ app.post('/api/cow/buy', async (req, res) => {
 app.post('/api/cow/prestige', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-
     const state = await getCowState(playerId);
     const cost = Math.floor(COW_CONFIG.prestigeBase * Math.pow(COW_CONFIG.prestigeStep, state.prestigeLevel));
+    if (state.milk < cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
 
-    if (state.milk < cost) {
-        return res.status(400).json({ success: false, error: 'Не хватает молока' });
-    }
-
-    // Повышаем уровень престижа и сбрасываем прогресс
     state.prestigeLevel += 1;
     state.milk = 0;
     state.clickUps = {};
     state.buildings = {};
     state.multipliers = {};
-    
-    // Выдаем награду в виде кейсов (2 кейса за каждый уровень престижа)
     const casesReward = state.prestigeLevel * 2;
     state.cases = (state.cases || 0) + casesReward;
-    
     saveCowState(playerId);
-    
-    // Возвращаем новое состояние и количество выданных кейсов
     res.json({ success: true, state, casesReward });
 });
 
-// ============================================================
-// API КЕЙСОВ И СКИНОВ
-// ============================================================
-// Получить ежедневный кейс (просто добавляет +1 кейс в инвентарь)
 app.post('/api/cow/claim-daily', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-
     const state = await getCowState(playerId);
-    const now = Date.now();
-
-    if (now < (state.nextCaseTime || 0)) {
-        return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
-    }
-
+    if (Date.now() < (state.nextCaseTime || 0)) return res.status(400).json({ success: false, error: 'Кейс еще не готов' });
     state.cases += 1;
     state.nextCaseTime = getNextMidnightMSK();
-    
     saveCowState(playerId);
     res.json({ success: true, state });
 });
 
-// Открыть 1 кейс (списывает кейс, крутит рулетку, выдает скин или кристаллы)
 app.post('/api/cow/open-case', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-
     const state = await getCowState(playerId);
     if (state.cases <= 0) return res.status(400).json({ success: false, error: 'Нет кейсов' });
-
     state.cases -= 1;
 
     let roll = Math.random() * 100;
@@ -791,7 +622,6 @@ app.post('/api/cow/open-case', async (req, res) => {
 
     let isDuplicate = false;
     let crystalsGained = 0;
-
     if (state.unlockedSkins.includes(selectedSkin.id)) {
         isDuplicate = true;
         crystalsGained = DUP_CRYSTALS[selectedSkin.rarity] || 0;
@@ -799,12 +629,10 @@ app.post('/api/cow/open-case', async (req, res) => {
     } else {
         state.unlockedSkins.push(selectedSkin.id);
     }
-
     saveCowState(playerId);
     res.json({ success: true, skin: selectedSkin, isDuplicate, crystalsGained, state });
 });
 
-// Магазин (покупка кейсов и скинов, экипировка)
 app.post('/api/cow/shop', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
@@ -815,44 +643,63 @@ app.post('/api/cow/shop', async (req, res) => {
         if (state.crystals < 50) return res.status(400).json({ success: false, error: 'Не хватает 💎' });
         state.crystals -= 50;
         state.cases += 1;
-    } 
-    else if (action === 'buy_skin') {
+    } else if (action === 'buy_skin') {
         const skin = COW_SKINS.find(s => s.id === itemId);
         if (!skin) return res.status(400).json({ success: false });
         if (state.unlockedSkins.includes(itemId)) return res.status(400).json({ success: false, error: 'Уже есть' });
         if (state.crystals < skin.price) return res.status(400).json({ success: false, error: 'Не хватает 💎' });
-        
         state.crystals -= skin.price;
         state.unlockedSkins.push(itemId);
-    }
-    else if (action === 'equip') {
+    } else if (action === 'equip') {
         if (!state.unlockedSkins.includes(itemId)) return res.status(400).json({ success: false });
         state.currentSkin = itemId;
     }
-
     saveCowState(playerId);
     res.json({ success: true, state });
 });
 
-app.post('/api/cow/equip', async (req, res) => {
+app.post('/api/cow/slime', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-
-    const { skinId } = req.body;
     const state = await getCowState(playerId);
+    const now = Date.now();
 
-    if (!state.unlockedSkins.includes(skinId)) {
-        return res.status(400).json({ success: false, error: 'Этот скин не разблокирован' });
+    if (now - (state.lastSlimeClick || 0) < 30000) {
+        return res.status(400).json({ success: false, error: 'Слизень еще не готов' });
     }
 
-    state.currentSkin = skinId;
+    state.lastSlimeClick = now;
+    const { mps } = calcCowMath(state);
+    let rewardMilk = 0;
+    let rewardCrystals = 0;
+    
+    if (Math.random() > 0.5) {
+        rewardMilk = mps * 120;
+        state.milk += rewardMilk;
+        state.totalMilk += rewardMilk;
+    } else {
+        rewardCrystals = 10;
+        state.crystals += rewardCrystals;
+    }
+
+    saveCowState(playerId);
+    syncCowLeaderboard(playerId, state);
+    res.json({ success: true, rewardMilk, rewardCrystals, state });
+});
+
+app.post('/api/cow/slime/escape', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const state = await getCowState(playerId);
+    state.milk = Math.floor(state.milk * 0.95);
     saveCowState(playerId);
     res.json({ success: true, state });
 });
 
 // ============================================================
-// УТИЛИТЫ МАТЧЕЙ
+// КОНЕЦ БЛОКА ФЕРМЫ. ДАЛЬШЕ ИДЕТ МУЛЬТИПЛЕЕР (ШАХМАТЫ И ШАШКИ)
 // ============================================================
+
 function finishMatch(match, winner, reason) {
     if (match.status === 'finished') return;
     match.status = 'finished';
@@ -865,7 +712,6 @@ function updateMultiplayerLeaderboard(gameId, match) {
     if (!match || !match.players || match.players.length !== 2) return;
     const winnerId = match.winner;
     if (!winnerId) return;
-
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     const lb = leaderboards[gameId];
 
@@ -880,7 +726,6 @@ function updateMultiplayerLeaderboard(gameId, match) {
         if (p.id === winnerId) entry.score += 1;
         else entry.losses += 1;
     }
-
     lb.sort((a, b) => (b.score - a.score) || (a.losses - b.losses));
     leaderboards[gameId] = lb.slice(0, 10);
     isLeaderboardDirty = true;
@@ -927,9 +772,6 @@ function checkChessDraw(match) {
     return null;
 }
 
-// ============================================================
-// ДВИЖОК ШАШЕК
-// ============================================================
 const CK = (() => {
     const DIRS = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
     const colorOf = (p) => (!p ? null : (p === 'w' || p === 'W' ? 'w' : 'b'));
@@ -1041,9 +883,6 @@ const CK = (() => {
     return { startPos, legal, make };
 })();
 
-// ============================================================
-// ДВИЖОК ШАХМАТ
-// ============================================================
 const CH = (() => {
     const isW = (p) => p === p.toUpperCase();
     const colorOf = (p) => (isW(p) ? 'w' : 'b');
@@ -1138,9 +977,6 @@ const CH = (() => {
     return { startPos, legal, make, inCheck, key, insufficient };
 })();
 
-// ============================================================
-// ШАШКИ ОНЛАЙН
-// ============================================================
 app.post('/api/checkers/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -1212,34 +1048,22 @@ app.get('/api/checkers/status', (req, res) => {
 app.get('/api/checkers/match/:matchId', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
-        return res.status(404).json({ success: false, error: 'Матч не найден' });
-    }
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) return res.status(404).json({ success: false, error: 'Матч не найден' });
     const m = matches[req.params.matchId];
-    if (!m.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
-    }
+    if (!m.players.some(p => p.id === playerId)) return res.status(403).json({ success: false, error: 'Вы не участник' });
 
     m.lastSeen[playerId] = nowMs();
-
     if (m.status === 'playing') {
         const opp = m.players.find(p => p.id !== playerId);
-        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
-            finishCheckersMatch(m, playerId, 'disconnect');
-        }
+        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) finishCheckersMatch(m, playerId, 'disconnect');
     }
-
     res.json({ success: true, match: m });
 });
 
 app.post('/api/checkers/match/:matchId/move', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
-        return res.status(404).json({ success: false, error: 'Матч не найден' });
-    }
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) return res.status(404).json({ success: false, error: 'Матч не найден' });
     const m = matches[req.params.matchId];
     if (m.status !== 'playing') return res.status(400).json({ success: false, error: 'Матч не идёт' });
 
@@ -1248,10 +1072,7 @@ app.post('/api/checkers/match/:matchId/move', (req, res) => {
     if (m.gameState.turn !== me.color) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
 
     const { move } = req.body || {};
-    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number'
-        || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) {
-        return res.status(400).json({ success: false, error: 'Неверный формат хода' });
-    }
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number' || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) return res.status(400).json({ success: false, error: 'Неверный формат хода' });
 
     const legal = CK.legal(m.gameState);
     const found = legal.find(x => x.from === move.from && x.to === move.to);
@@ -1262,37 +1083,23 @@ app.post('/api/checkers/match/:matchId/move', (req, res) => {
     m.lastSeen[playerId] = nowMs();
 
     const oppMoves = CK.legal(m.gameState);
-    if (oppMoves.length === 0) {
-        finishCheckersMatch(m, playerId, 'no-moves');
-    } else {
-        const draw = checkDraw(m);
-        if (draw) finishCheckersMatch(m, null, draw);
-    }
-
+    if (oppMoves.length === 0) finishCheckersMatch(m, playerId, 'no-moves');
+    else { const draw = checkDraw(m); if (draw) finishCheckersMatch(m, null, draw); }
     res.json({ success: true, match: m });
 });
 
 app.post('/api/checkers/match/:matchId/surrender', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
-        return res.json({ success: true });
-    }
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) return res.json({ success: true });
     const m = matches[req.params.matchId];
-    if (!m.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
-    }
+    if (!m.players.some(p => p.id === playerId)) return res.status(403).json({ success: false, error: 'Вы не участник' });
     if (m.status !== 'playing') return res.json({ success: true });
-
     const opp = m.players.find(p => p.id !== playerId);
     finishCheckersMatch(m, opp ? opp.id : null, 'surrender');
     res.json({ success: true });
 });
 
-// ============================================================
-// ШАХМАТЫ ОНЛАЙН
-// ============================================================
 app.post('/api/chess/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -1302,39 +1109,23 @@ app.post('/api/chess/find-match', (req, res) => {
     if (chessQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
     const activeMatch = Object.values(chessMatches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
-    if (activeMatch) {
-        activeMatch.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, matchId: activeMatch.id });
-    }
+    if (activeMatch) { activeMatch.lastSeen[playerId] = nowMs(); return res.json({ success: true, matchId: activeMatch.id }); }
 
-    if (chessQueue.length >= MAX_QUEUE) {
-        return res.status(503).json({ success: false, error: 'Очередь переполнена' });
-    }
+    if (chessQueue.length >= MAX_QUEUE) return res.status(503).json({ success: false, error: 'Очередь переполнена' });
 
     if (chessQueue.length > 0) {
         const opponent = chessQueue.shift();
         const matchId = crypto.randomUUID();
         const now = nowMs();
         const startState = CH.startPos();
-
         chessMatches[matchId] = {
             id: matchId,
-            players: [
-                { id: opponent.id, nickname: opponent.nickname, color: 'w' },
-                { id: playerId, nickname, color: 'b' }
-            ],
-            status: 'playing',
-            gameState: startState,
-            winner: null,
-            endReason: null,
-            createdAt: now,
-            finishedAt: null,
-            history: [CH.key(startState)],
-            lastSeen: { [opponent.id]: now, [playerId]: now }
+            players: [ { id: opponent.id, nickname: opponent.nickname, color: 'w' }, { id: playerId, nickname, color: 'b' } ],
+            status: 'playing', gameState: startState, winner: null, endReason: null, createdAt: now, finishedAt: null,
+            history: [CH.key(startState)], lastSeen: { [opponent.id]: now, [playerId]: now }
         };
         return res.json({ success: true, matchId });
     }
-
     chessQueue.push({ id: playerId, nickname, timestamp: nowMs() });
     return res.json({ success: true, status: 'waiting' });
 });
@@ -1342,20 +1133,12 @@ app.post('/api/chess/find-match', (req, res) => {
 app.get('/api/chess/status', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
     const m = Object.values(chessMatches).find(x => x.status === 'playing' && x.players.some(p => p.id === playerId));
-    if (m) {
-        m.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, matchId: m.id });
-    }
-
+    if (m) { m.lastSeen[playerId] = nowMs(); return res.json({ success: true, matchId: m.id }); }
     const idx = chessQueue.findIndex(p => p.id === playerId);
     if (idx !== -1) {
         const wait = nowMs() - chessQueue[idx].timestamp;
-        if (wait > MATCHMAKING_TIMEOUT) {
-            chessQueue.splice(idx, 1);
-            return res.json({ success: true, status: 'timeout' });
-        }
+        if (wait > MATCHMAKING_TIMEOUT) { chessQueue.splice(idx, 1); return res.json({ success: true, status: 'timeout' }); }
         return res.json({ success: true, status: 'waiting', waitTime: Math.floor(wait / 1000) });
     }
     return res.json({ success: true, status: 'none' });
@@ -1364,34 +1147,22 @@ app.get('/api/chess/status', (req, res) => {
 app.get('/api/chess/match/:matchId', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
-        return res.status(404).json({ success: false, error: 'Матч не найден' });
-    }
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) return res.status(404).json({ success: false, error: 'Матч не найден' });
     const m = chessMatches[req.params.matchId];
-    if (!m.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
-    }
+    if (!m.players.some(p => p.id === playerId)) return res.status(403).json({ success: false, error: 'Вы не участник' });
 
     m.lastSeen[playerId] = nowMs();
-
     if (m.status === 'playing') {
         const opp = m.players.find(p => p.id !== playerId);
-        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
-            finishChessMatch(m, playerId, 'disconnect');
-        }
+        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) finishChessMatch(m, playerId, 'disconnect');
     }
-
     res.json({ success: true, match: m });
 });
 
 app.post('/api/chess/match/:matchId/move', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
-        return res.status(404).json({ success: false, error: 'Матч не найден' });
-    }
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) return res.status(404).json({ success: false, error: 'Матч не найден' });
     const m = chessMatches[req.params.matchId];
     if (m.status !== 'playing') return res.status(400).json({ success: false, error: 'Матч не идёт' });
 
@@ -1400,17 +1171,10 @@ app.post('/api/chess/match/:matchId/move', (req, res) => {
     if (m.gameState.turn !== me.color) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
 
     const { move } = req.body || {};
-    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number'
-        || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) {
-        return res.status(400).json({ success: false, error: 'Неверный формат хода' });
-    }
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number' || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) return res.status(400).json({ success: false, error: 'Неверный формат хода' });
 
     const legal = CH.legal(m.gameState);
-    const found = legal.find(x =>
-        x.from === move.from &&
-        x.to === move.to &&
-        (x.promo || null) === (move.promo || null)
-    );
+    const found = legal.find(x => x.from === move.from && x.to === move.to && (x.promo || null) === (move.promo || null));
     if (!found) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
 
     m.gameState = CH.make(m.gameState, found);
@@ -1419,43 +1183,29 @@ app.post('/api/chess/match/:matchId/move', (req, res) => {
 
     const oppMoves = CH.legal(m.gameState);
     if (oppMoves.length === 0) {
-        if (CH.inCheck(m.gameState, m.gameState.turn)) {
-            finishChessMatch(m, playerId, 'checkmate');
-        } else {
-            finishChessMatch(m, null, 'stalemate');
-        }
+        if (CH.inCheck(m.gameState, m.gameState.turn)) finishChessMatch(m, playerId, 'checkmate');
+        else finishChessMatch(m, null, 'stalemate');
     } else {
         const draw = checkChessDraw(m);
         if (draw) finishChessMatch(m, null, draw);
     }
-
     res.json({ success: true, match: m });
 });
 
 app.post('/api/chess/match/:matchId/surrender', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
-        return res.json({ success: true });
-    }
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) return res.json({ success: true });
     const m = chessMatches[req.params.matchId];
-    if (!m.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
-    }
+    if (!m.players.some(p => p.id === playerId)) return res.status(403).json({ success: false, error: 'Вы не участник' });
     if (m.status !== 'playing') return res.json({ success: true });
-
     const opp = m.players.find(p => p.id !== playerId);
     finishChessMatch(m, opp ? opp.id : null, 'surrender');
     res.json({ success: true });
 });
 
-// ============================================================
-// ФОНОВАЯ ОЧИСТКА
-// ============================================================
 setInterval(() => {
     const now = nowMs();
-
     for (const id of Object.keys(matches)) {
         const m = matches[id];
         if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete matches[id]; continue; }
@@ -1468,7 +1218,6 @@ setInterval(() => {
     for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
         if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
     }
-
     for (const id of Object.keys(chessMatches)) {
         const m = chessMatches[id];
         if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete chessMatches[id]; continue; }
@@ -1483,9 +1232,6 @@ setInterval(() => {
     }
 }, 30 * 1000).unref?.();
 
-// ============================================================
-// ОТМЕНА ПОИСКА
-// ============================================================
 function makeCancelHandler(queueName) {
     return (req, res) => {
         const playerId = getAuthedPlayerId(req);
@@ -1502,7 +1248,6 @@ app.post('/api/chess/cancel',    makeCancelHandler('chess'));
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
-// Сначала загружаем базу, и только потом запускаем сервер
 async function startServer() {
     await loadLeaderboardsFromDB();
     app.listen(PORT, () => {
