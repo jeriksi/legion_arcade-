@@ -300,7 +300,7 @@ const CH = (() => {
 })();
 
 // ============================================================
-// API ПИНГ-ПОНГ ОНЛАЙН (HTTP Polling)
+// API ПИНГ-ПОНГ ОНЛАЙН (HTTP Polling, физика = офлайн-версия)
 // ============================================================
 app.post('/api/pong/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
@@ -308,10 +308,11 @@ app.post('/api/pong/find-match', (req, res) => {
 
     // Уже в активной игре?
     const activeRoom = Object.values(pongRooms).find(r =>
-        r.state === 'playing' && r.players.some(p => p.id === playerId));
+        r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (activeRoom) {
         if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, roomId: activeRoom.id });
+        const me = activeRoom.players.find(p => p.id === playerId);
+        return res.json({ success: true, roomId: activeRoom.id, playerIndex: me ? activeRoom.players.indexOf(me) : -1 });
     }
 
     // Уже в очереди?
@@ -324,17 +325,17 @@ app.post('/api/pong/find-match', (req, res) => {
         pongRooms[roomId] = {
             id: roomId,
             players: [
-                { id: opponent.id, nickname: opponent.nickname, paddleY: 150, index: 0 },
-                { id: playerId, nickname: nickname || 'Игрок', paddleY: 150, index: 1 }
+                { id: opponent.id, nickname: opponent.nickname, paddleY: PONG_H / 2, index: 0 },
+                { id: playerId, nickname: nickname || 'Игрок', paddleY: PONG_H / 2, index: 1 }
             ],
-            ball: { x: 200, y: 150, vx: 5, vy: 3 },
+            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 4, vy: 2 },
             score: { p1: 0, p2: 0 },
             state: 'playing',
             lastTick: ts,
             lastSeen: { [opponent.id]: ts, [playerId]: ts },
             finishedAt: null
         };
-        return res.json({ success: true, roomId });
+        return res.json({ success: true, roomId, playerIndex: 1 });
     }
 
     pongQueue.push({ id: playerId, nickname: nickname || 'Игрок', timestamp: nowMs() });
@@ -346,7 +347,8 @@ app.get('/api/pong/status/:playerId', (req, res) => {
     const room = Object.values(pongRooms).find(r => r.state === 'playing' && r.players.some(p => p.id === playerId));
     if (room) {
         if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, roomId: room.id });
+        const me = room.players.find(p => p.id === playerId);
+        return res.json({ success: true, roomId: room.id, playerIndex: me ? room.players.indexOf(me) : -1 });
     }
     const inQueue = pongQueue.find(p => p.id === playerId);
     if (inQueue) {
@@ -368,43 +370,54 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     const playerId = req.query.playerId;
     if (playerId && room.lastSeen) room.lastSeen[playerId] = nowMs();
 
-    // Физика (только пока идёт игра)
+    const me = playerId ? room.players.find(p => p.id === playerId) : null;
+    const playerIndex = me ? room.players.indexOf(me) : -1;
+
+    // ---- Физика: 1:1 с офлайн-версией ----
     if (room.state === 'playing') {
         const now = nowMs();
-        const dt = Math.min((now - room.lastTick) / 16.66, 3); // ограничение на лаг
+        // dt в "кадрах" (1 кадр = 16.66 мс). Ограничение — защита от длинных пауз.
+        const dtFrames = Math.min((now - room.lastTick) / 16.66, 20);
         room.lastTick = now;
 
-        room.ball.x += room.ball.vx * dt;
-        room.ball.y += room.ball.vy * dt;
+        // Движение мяча
+        room.ball.x += room.ball.vx * dtFrames;
+        room.ball.y += room.ball.vy * dtFrames;
 
-        // Отскоки от верх/низ
+        // Отскок от верха/низа
         if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
-        if (room.ball.y >= 290) { room.ball.y = 290; room.ball.vy *= -1; }
+        else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
 
         const p1 = room.players[0], p2 = room.players[1];
-        const p1Y = p1.paddleY - 30, p2Y = p2.paddleY - 30;
+        const p1Top = p1.paddleY - PONG_PH / 2;
+        const p2Top = p2.paddleY - PONG_PH / 2;
 
-        // Левая ракетка
-        if (room.ball.x <= 8 && room.ball.y + 10 >= p1Y && room.ball.y <= p1Y + 60) {
-            room.ball.x = 8;
-            room.ball.vx = Math.abs(room.ball.vx) * 1.05;
-            room.ball.vy = ((room.ball.y - p1Y) / 60 - 0.5) * 10;
+        // Левая ракетка (игрок 0)
+        if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
+            if (room.ball.y + PONG_BS >= p1Top && room.ball.y <= p1Top + PONG_PH) {
+                room.ball.x = PONG_PW;
+                room.ball.vx *= -1.1;
+                room.ball.vy = ((room.ball.y + PONG_BS / 2 - p1.paddleY) / PONG_PH) * 10;
+            }
         }
-        // Правая ракетка
-        if (room.ball.x + 10 >= 392 && room.ball.y + 10 >= p2Y && room.ball.y <= p2Y + 60) {
-            room.ball.x = 392 - 10;
-            room.ball.vx = -Math.abs(room.ball.vx) * 1.05;
-            room.ball.vy = ((room.ball.y - p2Y) / 60 - 0.5) * 10;
+        // Правая ракетка (игрок 1)
+        if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
+            if (room.ball.y + PONG_BS >= p2Top && room.ball.y <= p2Top + PONG_PH) {
+                room.ball.x = PONG_W - PONG_PW - PONG_BS;
+                room.ball.vx *= -1.1;
+                room.ball.vy = ((room.ball.y + PONG_BS / 2 - p2.paddleY) / PONG_PH) * 10;
+            }
         }
 
+        // Ограничение скорости
         room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
         room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
-        // Голы
-        if (room.ball.x < 0) { room.score.p2++; resetBall(room); }
-        else if (room.ball.x > 400) { room.score.p1++; resetBall(room); }
+        // Голы (проверяем ПОСЛЕ удара о ракетку — как в офлайне)
+        if (room.ball.x < 0) { room.score.p2++; resetBall(room); room.lastTick = nowMs(); }
+        else if (room.ball.x > PONG_W) { room.score.p1++; resetBall(room); room.lastTick = nowMs(); }
 
-        if (room.score.p1 >= 7 || room.score.p2 >= 7) {
+        if (room.score.p1 >= PONG_WIN || room.score.p2 >= PONG_WIN) {
             room.state = 'finished';
             room.finishedAt = nowMs();
         }
@@ -412,8 +425,9 @@ app.get('/api/pong/room/:roomId', (req, res) => {
 
     res.json({
         success: true,
+        playerIndex,
         state: {
-            ball: { x: room.ball.x, y: room.ball.y },
+            ball: { x: room.ball.x, y: room.ball.y, vx: room.ball.vx, vy: room.ball.vy },
             score: { p1: room.score.p1, p2: room.score.p2 },
             p1Y: room.players[0].paddleY,
             p2Y: room.players[1].paddleY,
@@ -431,7 +445,8 @@ app.post('/api/pong/room/:roomId/move', (req, res) => {
     if (!player) return res.status(400).json({ success: false, error: 'Вы не участник' });
 
     if (room.lastSeen) room.lastSeen[playerId] = nowMs();
-    player.paddleY = Math.max(30, Math.min(270, y));
+    // Ограничиваем центр ракетки — как в офлайн-версии (H/2 ± PH/2)
+    player.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
     res.json({ success: true });
 });
 
