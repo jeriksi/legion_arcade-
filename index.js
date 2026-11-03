@@ -467,7 +467,7 @@ function finishMatch(match, winner, reason) {
 function updateMultiplayerLeaderboard(gameId, match) {
     if (!match || !match.players || match.players.length !== 2) return;
     const winnerId = match.winner;
-    if (!winnerId) return; // ничья — не учитываем
+    if (!winnerId) return;
 
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     const lb = leaderboards[gameId];
@@ -499,6 +499,24 @@ function finishChessMatch(match, winner, reason) {
     const wasPlaying = match.status === 'playing';
     finishMatch(match, winner, reason);
     if (wasPlaying && winner) updateMultiplayerLeaderboard('chess-mp', match);
+}
+
+// ============================================================
+// ЕДИНАЯ ОЧЕРЕДЬ: игрок ждёт матч ТОЛЬКО в одной игре одновременно
+// ============================================================
+function removeFromOtherQueues(playerId, keepQueue) {
+    if (keepQueue !== 'checkers') {
+        const i = matchmakingQueue.findIndex(p => p.id === playerId);
+        if (i !== -1) matchmakingQueue.splice(i, 1);
+    }
+    if (keepQueue !== 'chess') {
+        const i = chessQueue.findIndex(p => p.id === playerId);
+        if (i !== -1) chessQueue.splice(i, 1);
+    }
+    if (keepQueue !== 'pong') {
+        const i = pongQueue.findIndex(p => p.id === playerId);
+        if (i !== -1) pongQueue.splice(i, 1);
+    }
 }
 
 function checkDraw(match) {
@@ -748,6 +766,7 @@ app.post('/api/checkers/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
     const nickname = sanitizeNickname(req.body && req.body.nickname);
+    removeFromOtherQueues(playerId, 'checkers');
 
     if (matchmakingQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
@@ -789,107 +808,11 @@ app.post('/api/checkers/find-match', (req, res) => {
     return res.json({ success: true, status: 'waiting' });
 });
 
-app.get('/api/checkers/status', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = Object.values(matches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
-    if (match) {
-        match.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, matchId: match.id });
-    }
-    const inQueue = matchmakingQueue.find(p => p.id === playerId);
-    if (inQueue) {
-        const waitTime = nowMs() - inQueue.timestamp;
-        if (waitTime > MATCHMAKING_TIMEOUT) {
-            const idx = matchmakingQueue.findIndex(p => p.id === playerId);
-            if (idx !== -1) matchmakingQueue.splice(idx, 1);
-            return res.json({ success: true, status: 'timeout' });
-        }
-        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
-    }
-    return res.json({ success: true, status: 'none' });
-});
-
-app.get('/api/checkers/match/:id', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = matches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (!match.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
-    }
-
-    match.lastSeen[playerId] = nowMs();
-    if (match.status === 'playing') {
-        const opponent = match.players.find(p => p.id !== playerId);
-        if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) {
-            finishCheckersMatch(match, playerId, 'disconnect');
-        }
-    }
-    res.json({ success: true, match });
-});
-
-app.post('/api/checkers/match/:id/move', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = matches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
-
-    const player = match.players.find(p => p.id === playerId);
-    if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
-    if (player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
-
-    const { move } = req.body || {};
-    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') {
-        return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
-    }
-
-    match.lastSeen[player.id] = nowMs();
-    const validMoves = CK.legal(match.gameState);
-    const realMove = validMoves.find(m => m.from === move.from && m.to === move.to);
-    if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
-
-    match.gameState = CK.make(match.gameState, realMove);
-    match.history.push(posKey(match.gameState));
-
-    const nextMoves = CK.legal(match.gameState);
-    if (nextMoves.length === 0) finishCheckersMatch(match, player.id, 'no-moves');
-    else { const drawReason = checkDraw(match); if (drawReason) finishCheckersMatch(match, null, drawReason); }
-
-    res.json({ success: true, match });
-});
-
-app.post('/api/checkers/match/:id/surrender', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = matches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-
-    // Сначала — принадлежность. Иначе любой авторизованный, знающий UUID
-    // завершённой партии, читает её содержимое через surrender.
-    const player = match.players.find(p => p.id === playerId);
-    if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
-
-    if (match.status !== 'playing') return res.json({ success: true, match });
-
-    const opponent = match.players.find(p => p.id !== player.id);
-    finishCheckersMatch(match, opponent ? opponent.id : null, 'surrender');
-    match.lastSeen[player.id] = nowMs();
-    res.json({ success: true, match });
-});
-
-// ============================================================
-// ШАХМАТЫ ОНЛАЙН
-// ============================================================
 app.post('/api/chess/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
     const nickname = sanitizeNickname(req.body && req.body.nickname);
+    removeFromOtherQueues(playerId, 'chess');
 
     if (chessQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
@@ -931,101 +854,50 @@ app.post('/api/chess/find-match', (req, res) => {
     return res.json({ success: true, status: 'waiting' });
 });
 
-app.get('/api/chess/status', (req, res) => {
+app.post('/api/pong/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+    const nickname = sanitizeNickname(req.body && req.body.nickname);
+    removeFromOtherQueues(playerId, 'pong');
 
-    const match = Object.values(chessMatches).find(m => m.status === 'playing' && m.players.some(p => p.id === playerId));
-    if (match) {
-        match.lastSeen[playerId] = nowMs();
-        return res.json({ success: true, matchId: match.id });
-    }
-    const inQueue = chessQueue.find(p => p.id === playerId);
-    if (inQueue) {
-        const waitTime = nowMs() - inQueue.timestamp;
-        if (waitTime > MATCHMAKING_TIMEOUT) {
-            const idx = chessQueue.findIndex(p => p.id === playerId);
-            if (idx !== -1) chessQueue.splice(idx, 1);
-            return res.json({ success: true, status: 'timeout' });
-        }
-        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(waitTime / 1000) });
-    }
-    return res.json({ success: true, status: 'none' });
-});
-
-app.get('/api/chess/match/:id', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = chessMatches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (!match.players.some(p => p.id === playerId)) {
-        return res.status(403).json({ success: false, error: 'Вы не участник' });
+    const activeRoom = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
+    if (activeRoom) {
+        if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
+        const me = activeRoom.players.find(p => p.id === playerId);
+        return res.json({ success: true, roomId: activeRoom.id, playerIndex: me ? activeRoom.players.indexOf(me) : -1 });
     }
 
-    match.lastSeen[playerId] = nowMs();
-    if (match.status === 'playing') {
-        const opponent = match.players.find(p => p.id !== playerId);
-        if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) {
-            finishChessMatch(match, playerId, 'disconnect');
-        }
-    }
-    res.json({ success: true, match });
-});
+    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
 
-app.post('/api/chess/match/:id/move', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = chessMatches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (match.status !== 'playing') return res.status(400).json({ success: false, error: 'Игра завершена' });
-
-    const player = match.players.find(p => p.id === playerId);
-    if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
-    if (player.color !== match.gameState.turn) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
-
-    const { move } = req.body || {};
-    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number') {
-        return res.status(400).json({ success: false, error: 'Некорректный формат хода' });
+    if (pongQueue.length >= MAX_QUEUE) {
+        return res.status(503).json({ success: false, error: 'Очередь переполнена' });
     }
 
-    match.lastSeen[player.id] = nowMs();
-    const validMoves = CH.legal(match.gameState);
-    const realMove = validMoves.find(m => m.from === move.from && m.to === move.to && (!m.promo || m.promo === move.promo));
-    if (!realMove) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
-
-    match.gameState = CH.make(match.gameState, realMove);
-    match.history.push(CH.key(match.gameState));
-
-    const nextMoves = CH.legal(match.gameState);
-    if (nextMoves.length === 0) {
-        const isCheck = CH.inCheck(match.gameState, match.gameState.turn);
-        finishChessMatch(match, isCheck ? player.id : null, isCheck ? 'checkmate' : 'stalemate');
-    } else {
-        const drawReason = checkChessDraw(match);
-        if (drawReason) finishChessMatch(match, null, drawReason);
+    if (pongQueue.length > 0) {
+        const opponent = pongQueue.shift();
+        const roomId = crypto.randomUUID();
+        const ts = nowMs();
+        pongRooms[roomId] = {
+            id: roomId,
+            players: [
+                { id: opponent.id, nickname: opponent.nickname, paddleY: PONG_H / 2, index: 0 },
+                { id: playerId, nickname, paddleY: PONG_H / 2, index: 1 }
+            ],
+            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 },
+            score: { p1: 0, p2: 0 },
+            state: 'countdown',
+            countdownEnd: ts + PONG_START_COUNTDOWN,
+            countdownIsInitial: true,
+            winner: null,
+            lastTick: ts,
+            lastSeen: { [opponent.id]: ts, [playerId]: ts },
+            finishedAt: null
+        };
+        return res.json({ success: true, roomId, playerIndex: 1 });
     }
-    res.json({ success: true, match });
-});
 
-app.post('/api/chess/match/:id/surrender', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-
-    const match = chessMatches[req.params.id];
-    if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-
-    // Сначала — принадлежность (см. комментарий в шашках).
-    const player = match.players.find(p => p.id === playerId);
-    if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
-
-    if (match.status !== 'playing') return res.json({ success: true, match });
-
-    const opponent = match.players.find(p => p.id !== player.id);
-    finishChessMatch(match, opponent ? opponent.id : null, 'surrender');
-    match.lastSeen[player.id] = nowMs();
-    res.json({ success: true, match });
+    pongQueue.push({ id: playerId, nickname, timestamp: nowMs() });
+    return res.json({ success: true, status: 'waiting' });
 });
 
 // ============================================================
@@ -1302,6 +1174,24 @@ setInterval(() => {
         if (now - pongQueue[i].timestamp > MATCHMAKING_TIMEOUT) pongQueue.splice(i, 1);
     }
 }, 30 * 1000).unref?.();
+
+// ============================================================
+// ОТМЕНА ПОИСКА
+// ============================================================
+function makeCancelHandler(queueName) {
+    return (req, res) => {
+        const playerId = getAuthedPlayerId(req);
+        if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+        const queues = { checkers: matchmakingQueue, chess: chessQueue, pong: pongQueue };
+        const q = queues[queueName];
+        const i = q.findIndex(p => p.id === playerId);
+        if (i !== -1) q.splice(i, 1);
+        res.json({ success: true });
+    };
+}
+app.post('/api/checkers/cancel', makeCancelHandler('checkers'));
+app.post('/api/chess/cancel',    makeCancelHandler('chess'));
+app.post('/api/pong/cancel',     makeCancelHandler('pong'));
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
