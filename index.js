@@ -452,15 +452,16 @@ app.post('/api/scores', (req, res) => {
     const rules = GAME_RULES[gameId];
     if (!rules) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
 
-    if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
+        if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
         return res.status(400).json({
             success: false,
             error: 'Рекорды этой игры учитываются сервером автоматически'
         });
-        if (gameId === 'cowclicker') {
+    }
+    if (gameId === 'cowclicker') {
         return res.status(400).json({ success: false, error: 'Рекорды кликера считаются автоматически на сервере' });
     }
-
+    
     nickname = sanitizeNickname(nickname);
     score = Math.floor(Number(score));
     if (isNaN(score) || score < 0 || score > rules.maxScore) {
@@ -594,6 +595,7 @@ app.post('/api/cow/buy', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
     const { type, id, qty } = req.body;
+    if (!qty || typeof qty !== 'number' || qty <= 0) return res.status(400).json({ success: false });
     
     const state = await getCowState(playerId);
     tickCow(state);
@@ -614,11 +616,13 @@ app.post('/api/cow/buy', async (req, res) => {
         const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
         if (!cfg) return res.status(400).json({ success: false });
         const owned = state.clickUps[id] || 0;
-        const price = Math.floor(cfg.cost * Math.pow(cfg.mult, owned));
+        let price = 0;
+        for (let i = 0; i < qty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
+        price = Math.floor(price);
         
         if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
         state.milk -= price;
-        state.clickUps[id] = owned + 1;
+        state.clickUps[id] = owned + qty;
     }
     else if (type === 'mult') {
         const cfg = COW_CONFIG.mults.find(m => m.id === id);
@@ -631,25 +635,6 @@ app.post('/api/cow/buy', async (req, res) => {
     saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, milk: state.milk });
-});
-
-app.post('/api/cow/prestige', async (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false });
-
-    const state = await getCowState(playerId);
-    const cost = Math.floor(COW_CONFIG.prestigeBase * Math.pow(COW_CONFIG.prestigeStep, state.prestigeLevel));
-
-    if (state.milk < cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
-
-    state.prestigeLevel += 1;
-    state.milk = 0;
-    state.clickUps = {};
-    state.buildings = {};
-    state.multipliers = {};
-    
-    saveCowState(playerId);
-    res.json({ success: true, state });
 });
 
 // ============================================================
