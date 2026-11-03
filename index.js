@@ -58,6 +58,7 @@ const GAME_RULES = {
     'chess':         { lower: false, maxScore: 99999,   minSeconds: 0 },
     'checkers-mp':   { lower: false, maxScore: 99999,   minSeconds: 0 },
     'chess-mp':      { lower: false, maxScore: 99999,   minSeconds: 0 },
+    'cowclicker':    { lower: false, maxScore: 1000000000, minSeconds: 5 },
 };
 
 // ============================================================
@@ -384,7 +385,8 @@ app.post('/api/scores', (req, res) => {
     else if (gameId.startsWith('snake_')) minSeconds = Math.max(minSeconds, score * 0.1);
     else if (gameId === 'match3')       minSeconds = Math.max(minSeconds, score * 0.05);
     else if (gameId.startsWith('pong_')) minSeconds = Math.max(minSeconds, score * 15);
-
+    else if (gameId === 'cowclicker')   minSeconds = Math.max(minSeconds, score / 100000);
+    
     if (elapsedSeconds < minSeconds) {
         return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
     }
