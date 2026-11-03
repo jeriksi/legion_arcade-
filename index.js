@@ -5,6 +5,20 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
+// ДОВЕРИЕ К ОБРАТНОМУ ПРОКСИ
+// ============================================================
+// Если приложение стоит за одним обратным прокси (Render, Heroku и т.п.),
+// включайте TRUST_PROXY=1 в переменных окружения хостинга.
+// Express сам корректно разберёт X-Forwarded-For через пакет proxy-addr:
+// берёт не «первый» (легко подделывается клиентом), а ближайший
+// недоверенный хоп. req.ip тогда становится реальным IP клиента.
+// Если TRUST_PROXY выключен — req.ip = адрес прямого сокета, что
+// тоже честно: за прокси все клиенты получат один общий лимит,
+// но зато никто не сможет его обойти подделкой заголовка.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+app.set('trust proxy', TRUST_PROXY ? 1 : false);
+
+// ============================================================
 // КОНСТАНТЫ
 // ============================================================
 const MATCHMAKING_TIMEOUT = 30 * 1000;
@@ -57,18 +71,6 @@ function sanitizeNickname(n) {
         .replace(/[<>&"'\x00-\x1f\x7f]/g, '')
         .substring(0, 20)
         .trim() || 'Аноним';
-}
-
-const TRUST_PROXY = process.env.TRUST_PROXY === '1';
-function getClientIp(req) {
-    if (TRUST_PROXY) {
-        const xff = req.headers['x-forwarded-for'];
-        if (xff) {
-            const first = String(xff).split(',')[0].trim();
-            if (first) return first;
-        }
-    }
-    return req.socket.remoteAddress || 'unknown';
 }
 
 // ============================================================
@@ -143,7 +145,8 @@ setInterval(() => {
 }, 60 * 1000).unref?.();
 
 app.use((req, res, next) => {
-    const ip = getClientIp(req);
+    // req.ip — корректный IP клиента с учётом настройки trust proxy.
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('ip:' + ip, 150, 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много запросов. Подождите.' });
     }
@@ -164,7 +167,7 @@ app.use(express.json({ limit: '32kb' }));
 // РЕГИСТРАЦИЯ ИГРОКА
 // ============================================================
 app.post('/api/player/register', (req, res) => {
-    const ip = getClientIp(req);
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
     }
@@ -182,10 +185,11 @@ app.post('/api/player/register', (req, res) => {
     res.json({ success: true, playerId, token });
 });
 
+// Чистим неактивных игроков ежечасно, независимо от их количества.
+// Раньше порог был players.size > MAX_PLAYERS * 0.5, из-за чего при
+// небольшой базе записи жили вечно.
 setInterval(() => {
-    if (players.size > MAX_PLAYERS * 0.5) {
-        cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
-    }
+    cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
 }, 60 * 60 * 1000).unref?.();
 
 // ============================================================
@@ -792,7 +796,6 @@ app.get('/api/checkers/match/:matchId', (req, res) => {
 
     m.lastSeen[playerId] = nowMs();
 
-    // Дисконнект соперника — присуждаем победу тому, кто ещё стучится.
     if (m.status === 'playing') {
         const opp = m.players.find(p => p.id !== playerId);
         if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
