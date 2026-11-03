@@ -83,20 +83,32 @@ const COW_CONFIG = {
 };
 
 const COW_SKINS = [
-    { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 40, price: 30 },
-    { id: 'cool',    name: 'Крутая',        icon: '😎', rarity: 'common',    chance: 20, price: 30 },
-    { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 15, price: 100 },
-    { id: 'alien',   name: 'Космическая',   icon: '👽', rarity: 'rare',      chance: 10, price: 100 },
-    { id: 'zombie',  name: 'Зомби',         icon: '🧟', rarity: 'epic',      chance: 8,  price: 300 },
-    { id: 'cyber',   name: 'Кибер-корова',  icon: '🤖', rarity: 'epic',      chance: 4,  price: 300 },
-    { id: 'ghost',   name: 'Призрачная',    icon: '👻', rarity: 'legendary', chance: 1.5,price: 1000 },
-    { id: 'demon',   name: 'Демоническая',  icon: '😈', rarity: 'legendary', chance: 1,  price: 1000 },
-    { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 0.4,price: 1000 },
-    { id: 'divine',  name: 'Божественная',  icon: '🐂', rarity: 'legendary', chance: 0.1,price: 1000 }
+    // 🟢 Common — 60% шанс (по 15% на каждый)
+    { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
+    { id: 'cool',    name: 'Ледяная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
+    { id: 'pink',    name: 'Розовая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
+    { id: 'green',   name: 'Луговая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
+
+    // 🔵 Rare — 25% шанс (по 12.5% на каждый)
+    { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
+    { id: 'purple',  name: 'Аметистовая',   icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
+
+    // 🟣 Epic — 12% шанс (по 6% на каждый)
+    { id: 'ghost',   name: 'Призрачная',    icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
+    { id: 'cyber',   name: 'Кибер-корова',  icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
+
+    // 🟡 Legendary — 3% шанс (по 1.5% на каждый)
+    { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 1.5,  price: 1500 },
+    { id: 'divine',  name: 'Божественная',  icon: '🐮', rarity: 'legendary', chance: 1.5,  price: 1500 }
 ];
 
-// Сколько кристаллов дают за дубликат
-const DUP_CRYSTALS = { common: 5, rare: 15, epic: 50, legendary: 200 };
+// Сколько кристаллов дают за дубликат (сбалансировано по редкости)
+const DUP_CRYSTALS = { 
+    common: 5, 
+    rare: 20, 
+    epic: 60, 
+    legendary: 250 
+};
 
 function getNextMidnightMSK() {
     const now = new Date();
@@ -597,21 +609,27 @@ function syncCowLeaderboard(playerId, s) {
     const existing = lb.find(x => x.playerId === playerId);
     
     const p = players.get(playerId);
-    const currentNickname = (p && p.nickname) ? p.nickname : 'Аноним';
+    const currentNickname = (p && p.nickname) ? p.nickname : null;
 
     if (existing) {
         let updated = false;
         if (score > existing.score) { existing.score = score; updated = true; }
-        if (existing.nickname !== currentNickname) { existing.nickname = currentNickname; updated = true; }
+        
+        // Не затираем нормальный ник на "Аноним"
+        if (currentNickname && existing.nickname !== currentNickname) { 
+            existing.nickname = currentNickname; 
+            updated = true; 
+        }
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
-        lb.push({ playerId, nickname: currentNickname, score, losses: 0, date: Date.now() });
+        // Если у игрока еще нет ника, ставим заглушку, но при следующем синке она исправится
+        lb.push({ playerId, nickname: currentNickname || 'Загрузка...', score, losses: 0, date: Date.now() });
         isLeaderboardDirty = true;
     }
+    
     lb.sort((a, b) => b.score - a.score);
     leaderboards['cowclicker'] = lb.slice(0, 10);
 }
-
 app.post('/api/cow/sync', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
