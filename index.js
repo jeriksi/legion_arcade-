@@ -188,7 +188,7 @@ app.post('/api/player/register', (req, res) => {
     const ip = getClientIp(req);
     // Не более 5 регистраций в час с одного IP. Счётчик очищается
     // корректно (см. выше) — часовое окно не сбрасывается.
-    if (!checkRateLimit('reg:' + ip, 5, 60 * 60 * 1000)) {
+    if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
     }
     // Перед отказом пробуем освободить место.
