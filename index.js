@@ -32,7 +32,7 @@ const PONG_START_COUNTDOWN = 3000;
 const PONG_GOAL_COUNTDOWN = 800;
 const PONG_MAX_STEP_MS = 4;
 const PONG_MAX_SUBSTEPS = 250;
-const PONG_HITBOX_PAD = 6;
+const PONG_HITBOX_PAD = 10;
 
 // ============================================================
 // БЕЛЫЙ СПИСОК ИГР
@@ -62,7 +62,11 @@ const GAME_RULES = {
 // УТИЛИТЫ
 // ============================================================
 const nowMs = () => Date.now();
-const posKey = (pos) => pos.b.join('') + '|' + pos.turn;
+
+// Ключ позиции для истории/повторов. Пустые клетки нормализуем в '.',
+// иначе разные расстановки дают одинаковую строку ('' + join).
+// Работает и для шашек (''), и для шахмат (null).
+const posKey = (pos) => pos.b.map(p => p || '.').join('') + '|' + pos.turn;
 
 function sanitizeNickname(n) {
     return String(n || '')
@@ -101,6 +105,17 @@ const pongQueue = [];
 const leaderboards = {};
 const gameSessions = new Map();         // sessionId -> { gameId, playerId, startTime }
 const playerGameSessions = new Map();   // `${playerId}:${gameId}` -> sessionId
+
+// Безопасный доступ к комнатам Pong — защищает от __proto__/constructor.
+// Без этой проверки pongRooms['__proto__'] возвращает Object.prototype,
+// проверка `if (!room)` его пропускает, и следующий room.players.find(...) падает.
+function getPongRoom(id) {
+    if (typeof id !== 'string') return null;
+    if (!Object.prototype.hasOwnProperty.call(pongRooms, id)) return null;
+    const room = pongRooms[id];
+    if (!room || !Array.isArray(room.players)) return null;
+    return room;
+}
 
 // ============================================================
 // АВТОРИЗАЦИЯ
@@ -164,7 +179,8 @@ setInterval(() => {
 
 app.use((req, res, next) => {
     const ip = getClientIp(req);
-    const maxReq = req.path.startsWith('/api/pong/') ? 2500 : 150;
+    // Pong-клиент часто шлёт position ракетки — ему нужен высокий лимит.
+    const maxReq = req.path.startsWith('/api/pong/') ? 10000 : 150;
     if (!checkRateLimit('ip:' + ip, maxReq, 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много запросов. Подождите.' });
     }
@@ -186,8 +202,8 @@ app.use(express.json({ limit: '32kb' }));
 // ============================================================
 app.post('/api/player/register', (req, res) => {
     const ip = getClientIp(req);
-    // Не более 5 регистраций в час с одного IP. Счётчик очищается
-    // корректно (см. выше) — часовое окно не сбрасывается.
+    // Не более 60 регистраций в час с одного IP (общий потолок на случай
+    // корпоративных NAT). Счётчик очищается корректно (см. выше).
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
     }
@@ -854,52 +870,6 @@ app.post('/api/chess/find-match', (req, res) => {
     return res.json({ success: true, status: 'waiting' });
 });
 
-app.post('/api/pong/find-match', (req, res) => {
-    const playerId = getAuthedPlayerId(req);
-    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
-    const nickname = sanitizeNickname(req.body && req.body.nickname);
-    removeFromOtherQueues(playerId, 'pong');
-
-    const activeRoom = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
-    if (activeRoom) {
-        if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
-        const me = activeRoom.players.find(p => p.id === playerId);
-        return res.json({ success: true, roomId: activeRoom.id, playerIndex: me ? activeRoom.players.indexOf(me) : -1 });
-    }
-
-    if (pongQueue.find(p => p.id === playerId)) return res.json({ success: true, status: 'waiting' });
-
-    if (pongQueue.length >= MAX_QUEUE) {
-        return res.status(503).json({ success: false, error: 'Очередь переполнена' });
-    }
-
-    if (pongQueue.length > 0) {
-        const opponent = pongQueue.shift();
-        const roomId = crypto.randomUUID();
-        const ts = nowMs();
-        pongRooms[roomId] = {
-            id: roomId,
-            players: [
-                { id: opponent.id, nickname: opponent.nickname, paddleY: PONG_H / 2, index: 0 },
-                { id: playerId, nickname, paddleY: PONG_H / 2, index: 1 }
-            ],
-            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 },
-            score: { p1: 0, p2: 0 },
-            state: 'countdown',
-            countdownEnd: ts + PONG_START_COUNTDOWN,
-            countdownIsInitial: true,
-            winner: null,
-            lastTick: ts,
-            lastSeen: { [opponent.id]: ts, [playerId]: ts },
-            finishedAt: null
-        };
-        return res.json({ success: true, roomId, playerIndex: 1 });
-    }
-
-    pongQueue.push({ id: playerId, nickname, timestamp: nowMs() });
-    return res.json({ success: true, status: 'waiting' });
-});
-
 // ============================================================
 // ПИНГ-ПОНГ ОНЛАЙН
 // ============================================================
@@ -907,6 +877,7 @@ app.post('/api/pong/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
     const nickname = sanitizeNickname(req.body && req.body.nickname);
+    removeFromOtherQueues(playerId, 'pong');
 
     const activeRoom = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (activeRoom) {
@@ -975,7 +946,7 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
 
-    const room = pongRooms[req.params.roomId];
+    const room = getPongRoom(req.params.roomId);
     if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
 
     const me = room.players.find(p => p.id === playerId);
@@ -987,11 +958,7 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     if (paddleYQuery !== undefined && paddleYQuery !== '') {
         const y = Number(paddleYQuery);
         if (!isNaN(y)) {
-            const targetY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
-            const diff = targetY - me.paddleY;
-            const maxMove = 60;
-            if (Math.abs(diff) > maxMove) me.paddleY += Math.sign(diff) * maxMove;
-            else me.paddleY = targetY;
+            me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
         }
     }
 
@@ -1015,7 +982,9 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     }
 
     if (room.state === 'playing') {
-        const realDt = Math.min(now - room.lastTick, 1000);
+        // Ограничиваем шаг симуляции: при лагах/пропущенных опросах мяч
+        // не должен «телепортироваться» через всё поле.
+        const realDt = Math.min(now - room.lastTick, 100);
         room.lastTick = now;
         const substeps = Math.min(PONG_MAX_SUBSTEPS, Math.max(1, Math.ceil(realDt / PONG_MAX_STEP_MS)));
         const dtPerStep = realDt / substeps;
@@ -1095,7 +1064,7 @@ app.post('/api/pong/room/:roomId/move', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
 
-    const room = pongRooms[req.params.roomId];
+    const room = getPongRoom(req.params.roomId);
     if (!room) return res.status(404).json({ success: false, error: 'Комната не найдена' });
     const player = room.players.find(p => p.id === playerId);
     if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
@@ -1110,7 +1079,7 @@ app.post('/api/pong/room/:roomId/leave', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
 
-    const room = pongRooms[req.params.roomId];
+    const room = getPongRoom(req.params.roomId);
     if (!room) return res.json({ success: true });
 
     if (!room.players.some(p => p.id === playerId)) {
