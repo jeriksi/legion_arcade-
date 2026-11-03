@@ -83,17 +83,20 @@ const COW_CONFIG = {
 };
 
 const COW_SKINS = [
-    { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 40 },
-    { id: 'cool',    name: 'Крутая',        icon: '😎', rarity: 'common',    chance: 20 },
-    { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 15, color: '#ffd700' },
-    { id: 'alien',   name: 'Космическая',   icon: '👽', rarity: 'rare',      chance: 10, color: '#00ffcc' },
-    { id: 'zombie',  name: 'Зомби',         icon: '🧟', rarity: 'epic',      chance: 8,  color: '#55ff55' },
-    { id: 'cyber',   name: 'Кибер-корова',  icon: '🤖', rarity: 'epic',      chance: 4,  color: '#ff00ff' },
-    { id: 'ghost',   name: 'Призрачная',    icon: '👻', rarity: 'legendary', chance: 1.5,color: '#ffffff' },
-    { id: 'demon',   name: 'Демоническая',  icon: '😈', rarity: 'legendary', chance: 1,  color: '#ff0000' },
-    { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 0.4,color: '#00ffff' },
-    { id: 'divine',  name: 'Божественная',  icon: '🐂', rarity: 'legendary', chance: 0.1,color: '#ffffaa' }
+    { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 40, price: 30 },
+    { id: 'cool',    name: 'Крутая',        icon: '😎', rarity: 'common',    chance: 20, price: 30 },
+    { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 15, price: 100 },
+    { id: 'alien',   name: 'Космическая',   icon: '👽', rarity: 'rare',      chance: 10, price: 100 },
+    { id: 'zombie',  name: 'Зомби',         icon: '🧟', rarity: 'epic',      chance: 8,  price: 300 },
+    { id: 'cyber',   name: 'Кибер-корова',  icon: '🤖', rarity: 'epic',      chance: 4,  price: 300 },
+    { id: 'ghost',   name: 'Призрачная',    icon: '👻', rarity: 'legendary', chance: 1.5,price: 1000 },
+    { id: 'demon',   name: 'Демоническая',  icon: '😈', rarity: 'legendary', chance: 1,  price: 1000 },
+    { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 0.4,price: 1000 },
+    { id: 'divine',  name: 'Божественная',  icon: '🐂', rarity: 'legendary', chance: 0.1,price: 1000 }
 ];
+
+// Сколько кристаллов дают за дубликат
+const DUP_CRYSTALS = { common: 5, rare: 15, epic: 50, legendary: 200 };
 
 function getNextMidnightMSK() {
     const now = new Date();
@@ -147,14 +150,14 @@ async function getCowState(playerId) {
     if (cowStates.has(playerId)) return cowStates.get(playerId);
     const raw = await redis('GET', 'cow:' + playerId);
     
-    // Добавили lastCase, unlockedSkins и currentSkin
     let state = raw ? JSON.parse(raw) : { 
         milk: 0, totalMilk: 0, lastUpdate: Date.now(), 
         clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
-        nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal'
+        nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
+        crystals: 0, cases: 0
     };
-    
-    // Защита для старых сохранений
+    if (state.crystals == null) state.crystals = 0;
+    if (state.cases == null) state.cases = 0;
     if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
     if (!state.currentSkin) state.currentSkin = 'normal';
 
@@ -700,42 +703,117 @@ app.post('/api/cow/buy', async (req, res) => {
     res.json({ success: true, milk: state.milk });
 });
 
+app.post('/api/cow/prestige', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+
+    const state = await getCowState(playerId);
+    const cost = Math.floor(COW_CONFIG.prestigeBase * Math.pow(COW_CONFIG.prestigeStep, state.prestigeLevel));
+
+    if (state.milk < cost) {
+        return res.status(400).json({ success: false, error: 'Не хватает молока' });
+    }
+
+    // Повышаем уровень престижа и сбрасываем прогресс
+    state.prestigeLevel += 1;
+    state.milk = 0;
+    state.clickUps = {};
+    state.buildings = {};
+    state.multipliers = {};
+    
+    // Выдаем награду в виде кейсов (2 кейса за каждый уровень престижа)
+    const casesReward = state.prestigeLevel * 2;
+    state.cases = (state.cases || 0) + casesReward;
+    
+    saveCowState(playerId);
+    
+    // Возвращаем новое состояние и количество выданных кейсов
+    res.json({ success: true, state, casesReward });
+});
+
 // ============================================================
 // API КЕЙСОВ И СКИНОВ
 // ============================================================
-app.post('/api/cow/case', async (req, res) => {
+// Получить ежедневный кейс (просто добавляет +1 кейс в инвентарь)
+app.post('/api/cow/claim-daily', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
 
     const state = await getCowState(playerId);
     const now = Date.now();
 
-    // ВРЕМЕННО ОТКЛЮЧЕНО ДЛЯ ТЕСТОВ:
-    // if (now < (state.nextCaseTime || 0)) {
-    //     return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
-    // }
+    if (now < (state.nextCaseTime || 0)) {
+        return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
+    }
 
-    // Роллим скин
+    state.cases += 1;
+    state.nextCaseTime = getNextMidnightMSK();
+    
+    saveCowState(playerId);
+    res.json({ success: true, state });
+});
+
+// Открыть 1 кейс (списывает кейс, крутит рулетку, выдает скин или кристаллы)
+app.post('/api/cow/open-case', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+
+    const state = await getCowState(playerId);
+    if (state.cases <= 0) return res.status(400).json({ success: false, error: 'Нет кейсов' });
+
+    state.cases -= 1;
+
     let roll = Math.random() * 100;
     let selectedSkin = COW_SKINS[0];
     let currentChance = 0;
     for (const skin of COW_SKINS) {
         currentChance += skin.chance;
-        if (roll <= currentChance) {
-            selectedSkin = skin;
-            break;
-        }
+        if (roll <= currentChance) { selectedSkin = skin; break; }
     }
 
-    if (!state.unlockedSkins.includes(selectedSkin.id)) {
+    let isDuplicate = false;
+    let crystalsGained = 0;
+
+    if (state.unlockedSkins.includes(selectedSkin.id)) {
+        isDuplicate = true;
+        crystalsGained = DUP_CRYSTALS[selectedSkin.rarity] || 0;
+        state.crystals += crystalsGained;
+    } else {
         state.unlockedSkins.push(selectedSkin.id);
     }
 
-    // Устанавливаем время следующего открытия (00:00 МСК)
-    state.nextCaseTime = getNextMidnightMSK();
     saveCowState(playerId);
+    res.json({ success: true, skin: selectedSkin, isDuplicate, crystalsGained, state });
+});
 
-    res.json({ success: true, skin: selectedSkin, state });
+// Магазин (покупка кейсов и скинов, экипировка)
+app.post('/api/cow/shop', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const { action, itemId } = req.body;
+    const state = await getCowState(playerId);
+
+    if (action === 'buy_case') {
+        if (state.crystals < 50) return res.status(400).json({ success: false, error: 'Не хватает 💎' });
+        state.crystals -= 50;
+        state.cases += 1;
+    } 
+    else if (action === 'buy_skin') {
+        const skin = COW_SKINS.find(s => s.id === itemId);
+        if (!skin) return res.status(400).json({ success: false });
+        if (state.unlockedSkins.includes(itemId)) return res.status(400).json({ success: false, error: 'Уже есть' });
+        if (state.crystals < skin.price) return res.status(400).json({ success: false, error: 'Не хватает 💎' });
+        
+        state.crystals -= skin.price;
+        state.unlockedSkins.push(itemId);
+    }
+    else if (action === 'equip') {
+        if (!state.unlockedSkins.includes(itemId)) return res.status(400).json({ success: false });
+        state.currentSkin = itemId;
+    }
+
+    saveCowState(playerId);
+    res.json({ success: true, state });
 });
 
 app.post('/api/cow/equip', async (req, res) => {
