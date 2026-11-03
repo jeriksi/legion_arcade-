@@ -1318,7 +1318,11 @@ app.post('/api/chess/cancel',    makeCancelHandler('chess'));
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
-app.listen(PORT, () => {
-    console.log(`Слушаем порт ${PORT}`);
-    loadLeaderboardsFromDB();
-});
+// Сначала загружаем базу, и только потом запускаем сервер
+async function startServer() {
+    await loadLeaderboardsFromDB();
+    app.listen(PORT, () => {
+        console.log(`Слушаем порт ${PORT}`);
+    });
+}
+startServer();
