@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Legion: Arcade (мини-игры + Мультиплеер)
 // @namespace    https://github.com/
-// @version      0.5.1
+// @version      0.5.2
 // @description  Мини-игры в стиле Легиона: от сапёра до онлайн-шашек.
 // @match        https://play.multidonate.ru/c/*
 // @noframes
@@ -1848,7 +1848,7 @@ const CowClicker = {
         const SKIN_BONUSES = {
             normal:  { type: 'mps',      value: 0.02, desc: '+2% к производству' },
             cool:    { type: 'cp',       value: 0.03, desc: '+3% к силе клика' },
-            pink:    { type: 'crystals', value: 0.05, desc: '+5% к кристаллам' },
+            pink:    { type: 'crystals', value: 0.10, desc: '+10% к кристаллам' },
             green:   { type: 'slime',    value: 0.10, desc: '+10% к награде слизня' },
             golden:  { type: 'mps',      value: 0.08, desc: '+8% к производству' },
             purple:  { type: 'cp',       value: 0.08, desc: '+8% к силе клика' },
@@ -1878,10 +1878,10 @@ const CowClicker = {
         .cow-float { position: absolute; pointer-events: none; font-weight: 900; font-size: 20px; color: #f3c969; text-shadow: 0 2px 6px rgba(0,0,0,0.9); animation: cow-float-up 1s ease-out forwards; z-index: 5; }
         @keyframes cow-float-up { 0%{opacity:1;transform:translate(-50%,-50%)} 100%{opacity:0;transform:translate(-50%,-150%)} }
 
-        /* Слизень */
-        .cow-slime { position: absolute; font-size: 50px; cursor: pointer; animation: slime-wiggle 0.5s infinite; z-index: 20; filter: drop-shadow(0 0 10px #55ff55); }
+                /* Золотая корова */
+        .cow-slime { position: absolute; font-size: 55px; cursor: pointer; animation: slime-wiggle 0.5s infinite; z-index: 20; filter: drop-shadow(0 0 15px #ffd700); }
         @keyframes slime-wiggle { 0%, 100% { transform: scale(1) rotate(0deg); } 50% { transform: scale(1.2) rotate(15deg); } }
-
+        
         .cow-case-btn { position: absolute; right: 15px; top: 15px; background: rgba(243,201,105,0.15); border: 2px solid var(--gold); border-radius: 50%; width: 45px; height: 45px; font-size: 22px; cursor: pointer; z-index: 10; transition: transform 0.2s; display: flex; align-items: center; justify-content: center; }
         .cow-case-btn:hover { transform: scale(1.1); }
         .cow-case-btn.ready { animation: cow-pulse 1.5s infinite; }
@@ -2194,40 +2194,53 @@ const CowClicker = {
             });
         }
 
-        // ============================ МОЛОЧНЫЙ СЛИЗЕНЬ ============================
+                // ============================ ЗОЛОТАЯ КОРОВА ============================
         let slimeTimer = null, slimeEl = null, slimeEscapeTimer = null;
+        
         function scheduleSlime() {
             clearTimeout(slimeTimer);
-            slimeTimer = setTimeout(showSlime, 45000 + Math.random() * 45000);
+            // Появляется каждые 30-60 секунд
+            slimeTimer = setTimeout(showSlime, 60000 + Math.random() * 60000);
         }
+        
         function showSlime() {
             if (slimeEl || !mounted) return;
             const left = 10 + Math.random() * 70;
             const top = 10 + Math.random() * 70;
-            slimeEl = h('div', { class: 'cow-slime', text: '🪱', style: `left:${left}%; top:${top}%;`, onclick: onSlimeClick });
+            
+            // Меняем эмодзи на звезду/золотую корову
+            slimeEl = h('div', { class: 'cow-slime', text: '🌟', style: `left:${left}%; top:${top}%;`, onclick: onSlimeClick });
             stageEl.append(slimeEl);
+            
             slimeEscapeTimer = setTimeout(async () => {
                 if (slimeEl) {
                     slimeEl.remove(); slimeEl = null;
-                    showToast('🪱 Слизень съел 5% молока!');
+                    showToast('🌟 Золотая корова убежала! -5% молока');
                     const res = await serverRequest('/api/cow/slime/escape', { method: 'POST', body: '{}' });
                     if (res && res.success) { state.milk = res.state.milk; updateHeader(); }
                     scheduleSlime();
                 }
             }, 7000);
         }
+        
         async function onSlimeClick(e) {
             if (!slimeEl) return; e.stopPropagation();
             slimeEl.remove(); slimeEl = null; clearTimeout(slimeEscapeTimer);
+            
             const res = await serverRequest('/api/cow/slime', { method: 'POST', body: '{}' });
             if (res && res.success) {
                 state = res.state; updateHeader(); refreshVisibleCards();
-                if (res.rewardMilk > 0) { spawnFloat('+' + cowFmtNum(res.rewardMilk) + ' 🥛', e, '#55ff55', 24); showToast('🪱 Слизень пойман! Бонус молока!'); }
-                else { spawnFloat('+' + res.rewardCrystals + ' 💎', e, '#00ffff', 24); showToast('🪱 Слизень пойман! Бонус кристаллов!'); }
+                if (res.rewardMilk > 0) { 
+                    spawnFloat('+' + cowFmtNum(res.rewardMilk) + ' 🥛', e, '#ffd700', 24); 
+                    showToast('🌟 Золотая корова поймана! Бонус молока!'); 
+                } else { 
+                    spawnFloat('+' + res.rewardCrystals + ' 💎', e, '#00ffff', 24); 
+                    showToast('🌟 Золотая корова поймана! Бонус кристаллов!'); 
+                }
             }
             scheduleSlime();
         }
-
+        
         // ============================ UI ============================
         let lastHeaderUpdate = 0;
         function updateHeader() {
@@ -2431,7 +2444,7 @@ const CowClicker = {
         syncState();
         lastTick = Date.now();
         rafId = requestAnimationFrame(tick);
-        scheduleSlime(); // ЗАПУСК СЛИЗНЯ
+        scheduleSlime(); // Запуск Золотой коровы
 
         return {
             onShow() {
