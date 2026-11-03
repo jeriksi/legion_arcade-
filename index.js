@@ -25,8 +25,8 @@ const REPEAT_LIMIT = 3;
 
 // Pong — 1:1 с офлайн-версией в userscript
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
-const PONG_START_COUNTDOWN = 3000;
-const PONG_GOAL_COUNTDOWN = 2000;
+const PONG_START_COUNTDOWN = 3000;   // стартовый отсчёт (мс)
+const PONG_GOAL_COUNTDOWN = 800;     // пауза после гола (мс)
 const PONG_MAX_STEP_MS = 4;          // 4 мс субстеп — нет туннелирования
 const PONG_MAX_SUBSTEPS = 250;       // 1 сек / 4 мс
 const PONG_HITBOX_PAD = 6;           // ±6 px «прощения» хитбоксу (компенсация лага сети)
@@ -40,6 +40,7 @@ const matchmakingQueue = [];
 const chessQueue = [];
 const pongRooms = {};
 const pongQueue = [];
+// Fallback лидерборд (если не настроен Upstash)
 const leaderboards = {
     mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
 };
@@ -833,35 +834,110 @@ app.post('/api/chess/match/:id/surrender', (req, res) => {
 });
 
 // ============================================================
-// ЛИДЕРБОРД
+// ЛИДЕРБОРД (Upstash Redis с fallback в память)
 // ============================================================
-app.post('/api/scores', (req, res) => {
-    const { gameId, nickname, score, lowerIsBetter, losses = 0 } = req.body;
-    if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
-    if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
+const UPSTASH_URL = process.env.UPSTASH_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
 
-    if (!leaderboards[gameId]) leaderboards[gameId] = [];
-    let existing = leaderboards[gameId].find(x => x.nickname === nickname);
+async function redis(...args) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+    try {
+        const res = await fetch(UPSTASH_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(args)
+        });
+        if (!res.ok) { console.error('Redis HTTP', res.status); return null; }
+        const data = await res.json();
+        return data.result;
+    } catch (e) {
+        console.error('Redis error:', e.message);
+        return null;
+    }
+}
+
+const lowerIsBetterGame = (gameId) => gameId.startsWith('mines');
+
+async function saveScore(gameId, nickname, score, lowerIsBetter, losses) {
+    if (!UPSTASH_URL) {
+        // Fallback в память (не переживёт рестарт)
+        if (!leaderboards[gameId]) leaderboards[gameId] = [];
+        let existing = leaderboards[gameId].find(x => x.nickname === nickname);
+        if (existing) {
+            if (lowerIsBetter ? score < existing.score : score > existing.score) existing.score = score;
+            existing.losses = Math.max(existing.losses || 0, losses);
+            existing.date = Date.now();
+        } else {
+            leaderboards[gameId].push({ nickname, score, losses, date: Date.now(), id: crypto.randomUUID() });
+        }
+        leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
+        leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
+        return;
+    }
+
+    const key = `lb:${gameId}`;
+    const raw = await redis('HGET', key, nickname);
+    let existing = null;
+    if (raw) { try { existing = JSON.parse(raw); } catch (_) {} }
+
+    let newScore = score;
+    let newLosses = Math.max(existing?.losses || 0, losses);
+    let shouldWrite = true;
 
     if (existing) {
         if (lowerIsBetter) {
-            if (score < existing.score) existing.score = score;
+            if (score >= existing.score) { newScore = existing.score; shouldWrite = false; }
         } else {
-            if (score > existing.score) existing.score = score;
+            if (score <= existing.score) { newScore = existing.score; shouldWrite = false; }
         }
-        existing.losses = Math.max(existing.losses || 0, losses);
-        existing.date = Date.now();
-    } else {
-        leaderboards[gameId].push({ nickname: nickname || 'Игрок', score, losses, date: Date.now(), id: crypto.randomUUID() });
+        if (newLosses !== existing.losses) shouldWrite = true;
     }
 
-    leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
-    leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
+    if (shouldWrite) {
+        const entry = JSON.stringify({ score: newScore, losses: newLosses, date: Date.now() });
+        await redis('HSET', key, nickname, entry);
+    }
+}
+
+async function readScores(gameId) {
+    if (!UPSTASH_URL) {
+        return (leaderboards[gameId] || []).slice(0, 10);
+    }
+
+    const key = `lb:${gameId}`;
+    const all = await redis('HGETALL', key);
+    const scores = [];
+
+    if (Array.isArray(all)) {
+        for (let i = 0; i < all.length; i += 2) {
+            const nickname = all[i];
+            try {
+                const v = JSON.parse(all[i + 1]);
+                scores.push({ nickname, score: v.score, losses: v.losses || 0, date: v.date || 0 });
+            } catch (_) {}
+        }
+    }
+
+    const lowerIsBetter = lowerIsBetterGame(gameId);
+    scores.sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
+    return scores.slice(0, 10);
+}
+
+app.post('/api/scores', async (req, res) => {
+    const { gameId, nickname, score, lowerIsBetter, losses = 0 } = req.body;
+    if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
+    if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
+    if (typeof nickname !== 'string' || nickname.length > 24) return res.status(400).json({ success: false, error: 'Ник слишком длинный' });
+
+    await saveScore(gameId, nickname, score, !!lowerIsBetter, losses);
     res.json({ success: true });
 });
 
-app.get('/api/scores/:gameId', (req, res) => {
-    const scores = leaderboards[req.params.gameId] || [];
+app.get('/api/scores/:gameId', async (req, res) => {
+    const scores = await readScores(req.params.gameId);
     res.json({ success: true, scores });
 });
 
