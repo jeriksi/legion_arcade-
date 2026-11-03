@@ -12,7 +12,6 @@ const DISCONNECT_TIMEOUT = 60 * 1000;
 const FINISHED_MATCH_TTL = 10 * 60 * 1000;
 const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
 const SESSION_TTL = 2 * 60 * 60 * 1000;
-const RATE_LIMIT_CLEANUP_MS = 5 * 60 * 1000;
 const SESSION_CLEANUP_MS = 10 * 60 * 1000;
 
 const DRAW_HM_LIMIT = 30;
@@ -20,6 +19,13 @@ const REPEAT_LIMIT = 3;
 
 const MAX_QUEUE = 500;
 const MAX_PLAYERS = 100000;
+const MAX_SESSIONS = 100000;
+const SESSION_RATE_WINDOW_MS = 60 * 1000;
+const SESSION_RATE_MAX = 20;
+
+// Неактивные аккаунты удаляются только когда размер карты перевалил
+// за половину лимита — чтобы не терять редких игроков без причины.
+const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 дней
 
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
 const PONG_START_COUNTDOWN = 3000;
@@ -31,6 +37,9 @@ const PONG_HITBOX_PAD = 6;
 // ============================================================
 // БЕЛЫЙ СПИСОК ИГР
 // ============================================================
+// ВАЖНО: сервер валидирует только time-based sanity checks для соло-игр.
+// Мультиплеерные рекорды (checkers-mp, chess-mp) считаются ТОЛЬКО на сервере
+// в updateMultiplayerLeaderboard и через /api/scores от клиента НЕ принимаются.
 const GAME_RULES = {
     'mines_easy':    { lower: true,  maxScore: 3600,    minSeconds: 2 },
     'mines_mid':     { lower: true,  maxScore: 3600,    minSeconds: 2 },
@@ -79,7 +88,7 @@ function getClientIp(req) {
 // ============================================================
 // ХРАНИЛИЩА
 // ============================================================
-const players = new Map();        // playerId -> { token, createdAt }
+const players = new Map();        // playerId -> { token, createdAt, lastActiveAt }
 const tokensToPlayers = new Map(); // token -> playerId
 
 const matches = {};
@@ -90,7 +99,8 @@ const pongRooms = {};
 const pongQueue = [];
 
 const leaderboards = {};
-const gameSessions = new Map();
+const gameSessions = new Map();         // sessionId -> { gameId, playerId, startTime }
+const playerGameSessions = new Map();   // `${playerId}:${gameId}` -> sessionId
 
 // ============================================================
 // АВТОРИЗАЦИЯ
@@ -100,7 +110,26 @@ function getAuthedPlayerId(req) {
     if (!auth || !auth.startsWith('Bearer ')) return null;
     const token = auth.slice(7).trim();
     if (!token) return null;
-    return tokensToPlayers.get(token) || null;
+    const playerId = tokensToPlayers.get(token);
+    if (!playerId) return null;
+    const p = players.get(playerId);
+    if (p) p.lastActiveAt = nowMs();
+    return playerId;
+}
+
+// Удаляем только по-настоящему старые аккаунты. Вызывается редко и
+// только когда размер карты близок к лимиту.
+function cleanupInactivePlayers(thresholdMs) {
+    let removed = 0;
+    for (const [playerId, p] of players.entries()) {
+        if ((p.lastActiveAt || p.createdAt) < thresholdMs) {
+            players.delete(playerId);
+            tokensToPlayers.delete(p.token);
+            removed++;
+        }
+    }
+    if (removed > 0) console.log(`Очищено неактивных игроков: ${removed}`);
+    return removed;
 }
 
 // ============================================================
@@ -124,7 +153,14 @@ function checkRateLimit(key, maxReq, windowMs) {
     entry.count++;
     return entry.count <= maxReq;
 }
-setInterval(() => rateLimits.clear(), RATE_LIMIT_CLEANUP_MS).unref?.();
+// Убираем ТОЛЬКО истёкшие записи. Раньше был rateLimits.clear(),
+// который обнулял и часовые счётчики вместе с минутными.
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rateLimits.entries()) {
+        if (now > entry.reset) rateLimits.delete(key);
+    }
+}, 60 * 1000).unref?.();
 
 app.use((req, res, next) => {
     const ip = getClientIp(req);
@@ -150,19 +186,32 @@ app.use(express.json({ limit: '32kb' }));
 // ============================================================
 app.post('/api/player/register', (req, res) => {
     const ip = getClientIp(req);
-    // Не более 5 регистраций в час с одного IP
+    // Не более 5 регистраций в час с одного IP. Счётчик очищается
+    // корректно (см. выше) — часовое окно не сбрасывается.
     if (!checkRateLimit('reg:' + ip, 5, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
+    }
+    // Перед отказом пробуем освободить место.
+    if (players.size >= MAX_PLAYERS) {
+        cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
     }
     if (players.size >= MAX_PLAYERS) {
         return res.status(503).json({ success: false, error: 'Сервер перегружен' });
     }
     const playerId = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('hex');
-    players.set(playerId, { token, createdAt: nowMs() });
+    const now = nowMs();
+    players.set(playerId, { token, createdAt: now, lastActiveAt: now });
     tokensToPlayers.set(token, playerId);
     res.json({ success: true, playerId, token });
 });
+
+// Периодическая уборка — только при приближении к лимиту.
+setInterval(() => {
+    if (players.size > MAX_PLAYERS * 0.5) {
+        cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
+    }
+}, 60 * 60 * 1000).unref?.();
 
 // ============================================================
 // ЛИДЕРБОРД
@@ -262,7 +311,7 @@ process.on('SIGTERM', async () => {
 });
 
 // ============================================================
-// API СЕССИЙ (античит) — теперь строго привязаны к playerId
+// API СЕССИЙ (античит)
 // ============================================================
 app.post('/api/session/start', (req, res) => {
     const playerId = getAuthedPlayerId(req);
@@ -272,8 +321,21 @@ app.post('/api/session/start', (req, res) => {
     if (!gameId) return res.status(400).json({ success: false, error: 'Не указан gameId' });
     if (!GAME_RULES[gameId]) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
 
+    if (gameSessions.size >= MAX_SESSIONS) {
+        return res.status(503).json({ success: false, error: 'Сервер перегружен' });
+    }
+    if (!checkRateLimit('sess:' + playerId, SESSION_RATE_MAX, SESSION_RATE_WINDOW_MS)) {
+        return res.status(429).json({ success: false, error: 'Слишком часто. Подождите.' });
+    }
+
+    // Одна активная сессия на пару (playerId, gameId) — старую инвалидируем.
+    const pairKey = playerId + ':' + gameId;
+    const oldSid = playerGameSessions.get(pairKey);
+    if (oldSid) gameSessions.delete(oldSid);
+
     const sessionId = crypto.randomUUID();
     gameSessions.set(sessionId, { gameId, playerId, startTime: Date.now() });
+    playerGameSessions.set(pairKey, sessionId);
 
     res.json({ success: true, sessionId });
 });
@@ -281,7 +343,11 @@ app.post('/api/session/start', (req, res) => {
 setInterval(() => {
     const now = Date.now();
     for (const [id, s] of gameSessions.entries()) {
-        if (now - s.startTime > SESSION_TTL) gameSessions.delete(id);
+        if (now - s.startTime > SESSION_TTL) {
+            gameSessions.delete(id);
+            const pk = s.playerId + ':' + s.gameId;
+            if (playerGameSessions.get(pk) === id) playerGameSessions.delete(pk);
+        }
     }
 }, SESSION_CLEANUP_MS).unref?.();
 
@@ -297,6 +363,15 @@ app.post('/api/scores', (req, res) => {
 
     const rules = GAME_RULES[gameId];
     if (!rules) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
+
+    // Мультиплеерные рекорды считаются сервером автоматически при завершении
+    // матча. Клиент их присылать не должен — иначе это просто self-report.
+    if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
+        return res.status(400).json({
+            success: false,
+            error: 'Рекорды этой игры учитываются сервером автоматически'
+        });
+    }
 
     nickname = sanitizeNickname(nickname);
     score = Math.floor(Number(score));
@@ -315,14 +390,20 @@ app.post('/api/scores', (req, res) => {
     }
     if (session.gameId !== gameId) {
         gameSessions.delete(sessionId);
+        const pk = session.playerId + ':' + session.gameId;
+        if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
         return res.status(400).json({ success: false, error: 'Сессия от другой игры' });
     }
     if (session.playerId !== playerId) {
         gameSessions.delete(sessionId);
+        const pk = session.playerId + ':' + session.gameId;
+        if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
         return res.status(403).json({ success: false, error: 'Сессия другого игрока' });
     }
     // Одноразовость
     gameSessions.delete(sessionId);
+    const pk = playerId + ':' + gameId;
+    if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
 
     const elapsedSeconds = (Date.now() - session.startTime) / 1000;
     let minSeconds = rules.minSeconds || 0;
@@ -335,7 +416,7 @@ app.post('/api/scores', (req, res) => {
         return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
     }
 
-    // Лидерборд по playerId — ник это лишь метка, подменить невозможно
+    // Лидерборд по playerId — ник это лишь метка, подменить невозможно.
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     const lower = rules.lower;
     const existing = leaderboards[gameId].find(x => x.playerId === playerId);
@@ -374,10 +455,50 @@ app.get('/api/scores/:gameId', (req, res) => {
 // УТИЛИТЫ МАТЧЕЙ
 // ============================================================
 function finishMatch(match, winner, reason) {
+    if (match.status === 'finished') return;
     match.status = 'finished';
     match.winner = winner;
     match.endReason = reason;
     match.finishedAt = nowMs();
+}
+
+// Серверный учёт побед/поражений в мультиплеере.
+// Клиент больше НЕ отправляет /api/scores для *-mp: всё считается здесь.
+function updateMultiplayerLeaderboard(gameId, match) {
+    if (!match || !match.players || match.players.length !== 2) return;
+    const winnerId = match.winner;
+    if (!winnerId) return; // ничья — не учитываем
+
+    if (!leaderboards[gameId]) leaderboards[gameId] = [];
+    const lb = leaderboards[gameId];
+
+    for (const p of match.players) {
+        let entry = lb.find(x => x.playerId === p.id);
+        if (!entry) {
+            entry = { playerId: p.id, nickname: p.nickname, score: 0, losses: 0, date: Date.now() };
+            lb.push(entry);
+        }
+        entry.nickname = p.nickname;
+        entry.date = Date.now();
+        if (p.id === winnerId) entry.score += 1;
+        else entry.losses += 1;
+    }
+
+    lb.sort((a, b) => (b.score - a.score) || (a.losses - b.losses));
+    leaderboards[gameId] = lb.slice(0, 10);
+    isLeaderboardDirty = true;
+}
+
+function finishCheckersMatch(match, winner, reason) {
+    const wasPlaying = match.status === 'playing';
+    finishMatch(match, winner, reason);
+    if (wasPlaying && winner) updateMultiplayerLeaderboard('checkers-mp', match);
+}
+
+function finishChessMatch(match, winner, reason) {
+    const wasPlaying = match.status === 'playing';
+    finishMatch(match, winner, reason);
+    if (wasPlaying && winner) updateMultiplayerLeaderboard('chess-mp', match);
 }
 
 function checkDraw(match) {
@@ -704,7 +825,7 @@ app.get('/api/checkers/match/:id', (req, res) => {
     if (match.status === 'playing') {
         const opponent = match.players.find(p => p.id !== playerId);
         if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) {
-            finishMatch(match, playerId, 'disconnect');
+            finishCheckersMatch(match, playerId, 'disconnect');
         }
     }
     res.json({ success: true, match });
@@ -736,8 +857,8 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
     match.history.push(posKey(match.gameState));
 
     const nextMoves = CK.legal(match.gameState);
-    if (nextMoves.length === 0) finishMatch(match, player.id, 'no-moves');
-    else { const drawReason = checkDraw(match); if (drawReason) finishMatch(match, null, drawReason); }
+    if (nextMoves.length === 0) finishCheckersMatch(match, player.id, 'no-moves');
+    else { const drawReason = checkDraw(match); if (drawReason) finishCheckersMatch(match, null, drawReason); }
 
     res.json({ success: true, match });
 });
@@ -748,13 +869,16 @@ app.post('/api/checkers/match/:id/surrender', (req, res) => {
 
     const match = matches[req.params.id];
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (match.status !== 'playing') return res.json({ success: true, match });
 
+    // Сначала — принадлежность. Иначе любой авторизованный, знающий UUID
+    // завершённой партии, читает её содержимое через surrender.
     const player = match.players.find(p => p.id === playerId);
     if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
 
+    if (match.status !== 'playing') return res.json({ success: true, match });
+
     const opponent = match.players.find(p => p.id !== player.id);
-    finishMatch(match, opponent ? opponent.id : null, 'surrender');
+    finishCheckersMatch(match, opponent ? opponent.id : null, 'surrender');
     match.lastSeen[player.id] = nowMs();
     res.json({ success: true, match });
 });
@@ -843,7 +967,7 @@ app.get('/api/chess/match/:id', (req, res) => {
     if (match.status === 'playing') {
         const opponent = match.players.find(p => p.id !== playerId);
         if (opponent && nowMs() - (match.lastSeen[opponent.id] || 0) > DISCONNECT_TIMEOUT) {
-            finishMatch(match, playerId, 'disconnect');
+            finishChessMatch(match, playerId, 'disconnect');
         }
     }
     res.json({ success: true, match });
@@ -877,10 +1001,10 @@ app.post('/api/chess/match/:id/move', (req, res) => {
     const nextMoves = CH.legal(match.gameState);
     if (nextMoves.length === 0) {
         const isCheck = CH.inCheck(match.gameState, match.gameState.turn);
-        finishMatch(match, isCheck ? player.id : null, isCheck ? 'checkmate' : 'stalemate');
+        finishChessMatch(match, isCheck ? player.id : null, isCheck ? 'checkmate' : 'stalemate');
     } else {
         const drawReason = checkChessDraw(match);
-        if (drawReason) finishMatch(match, null, drawReason);
+        if (drawReason) finishChessMatch(match, null, drawReason);
     }
     res.json({ success: true, match });
 });
@@ -891,13 +1015,15 @@ app.post('/api/chess/match/:id/surrender', (req, res) => {
 
     const match = chessMatches[req.params.id];
     if (!match) return res.status(404).json({ success: false, error: 'Матч не найден' });
-    if (match.status !== 'playing') return res.json({ success: true, match });
 
+    // Сначала — принадлежность (см. комментарий в шашках).
     const player = match.players.find(p => p.id === playerId);
     if (!player) return res.status(403).json({ success: false, error: 'Вы не участник' });
 
+    if (match.status !== 'playing') return res.json({ success: true, match });
+
     const opponent = match.players.find(p => p.id !== player.id);
-    finishMatch(match, opponent ? opponent.id : null, 'surrender');
+    finishChessMatch(match, opponent ? opponent.id : null, 'surrender');
     match.lastSeen[player.id] = nowMs();
     res.json({ success: true, match });
 });
