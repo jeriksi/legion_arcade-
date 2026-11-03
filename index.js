@@ -58,7 +58,7 @@ const GAME_RULES = {
     'chess':         { lower: false, maxScore: 99999,   minSeconds: 0 },
     'checkers-mp':   { lower: false, maxScore: 99999,   minSeconds: 0 },
     'chess-mp':      { lower: false, maxScore: 99999,   minSeconds: 0 },
-    'cowclicker':    { lower: false, maxScore: 1000000000, minSeconds: 5 },
+    'cowclicker':    { lower: false, maxScore: 1e18, minSeconds: 60 },,
 };
 
 // ============================================================
