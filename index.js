@@ -705,10 +705,10 @@ app.post('/api/cow/case', async (req, res) => {
     const state = await getCowState(playerId);
     const now = Date.now();
 
-    // Если время еще не пришло — отказ
-    if (now < (state.nextCaseTime || 0)) {
-        return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
-    }
+    // ВРЕМЕННО ОТКЛЮЧЕНО ДЛЯ ТЕСТОВ:
+    // if (now < (state.nextCaseTime || 0)) {
+    //     return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
+    // }
 
     // Роллим скин
     let roll = Math.random() * 100;
