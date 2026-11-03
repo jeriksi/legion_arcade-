@@ -83,11 +83,16 @@ const COW_CONFIG = {
 };
 
 const COW_SKINS = [
-    { id: 'normal',   name: 'Обычная',   icon: '🐄', rarity: 'common', chance: 60 },
-    { id: 'golden',   name: 'Золотая',   icon: '🐄', rarity: 'rare',   chance: 25, color: '#ffd700' },
-    { id: 'alien',    name: 'Космическая', icon: '👽', rarity: 'rare',   chance: 10, color: '#00ffcc' },
-    { id: 'ghost',    name: 'Призрачная', icon: '👻', rarity: 'epic',   chance: 4,  color: '#ffffff' },
-    { id: 'diamond',  name: 'Алмазная',  icon: '🐄', rarity: 'legendary', chance: 1, color: '#00ffff' }
+    { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 40 },
+    { id: 'cool',    name: 'Крутая',        icon: '😎', rarity: 'common',    chance: 20 },
+    { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 15, color: '#ffd700' },
+    { id: 'alien',   name: 'Космическая',   icon: '👽', rarity: 'rare',      chance: 10, color: '#00ffcc' },
+    { id: 'zombie',  name: 'Зомби',         icon: '🧟', rarity: 'epic',      chance: 8,  color: '#55ff55' },
+    { id: 'cyber',   name: 'Кибер-корова',  icon: '🤖', rarity: 'epic',      chance: 4,  color: '#ff00ff' },
+    { id: 'ghost',   name: 'Призрачная',    icon: '👻', rarity: 'legendary', chance: 1.5,color: '#ffffff' },
+    { id: 'demon',   name: 'Демоническая',  icon: '😈', rarity: 'legendary', chance: 1,  color: '#ff0000' },
+    { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 0.4,color: '#00ffff' },
+    { id: 'divine',  name: 'Божественная',  icon: '🐂', rarity: 'legendary', chance: 0.1,color: '#ffffaa' }
 ];
 
 function getNextMidnightMSK() {
