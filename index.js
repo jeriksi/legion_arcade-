@@ -81,7 +81,7 @@ const COW_CONFIG = {
     prestigeStep: 5,
     prestigeMult: 1.5,
 };
-// Добавьте это внутрь COW_CONFIG или рядом с ним
+
 const COW_SKINS = [
     { id: 'normal',   name: 'Обычная',   icon: '🐄', rarity: 'common', chance: 60 },
     { id: 'golden',   name: 'Золотая',   icon: '🐄', rarity: 'rare',   chance: 25, color: '#ffd700' },
@@ -89,6 +89,16 @@ const COW_SKINS = [
     { id: 'ghost',    name: 'Призрачная', icon: '👻', rarity: 'epic',   chance: 4,  color: '#ffffff' },
     { id: 'diamond',  name: 'Алмазная',  icon: '🐄', rarity: 'legendary', chance: 1, color: '#00ffff' }
 ];
+
+function getNextMidnightMSK() {
+    const now = new Date();
+    // Переводим в МСК
+    now.setUTCHours(now.getUTCHours() + 3);
+    // Ставим 00:00:00 следующего дня
+    now.setUTCHours(24, 0, 0, 0);
+    // Возвращаем в UTC
+    return now.getTime() - (3 * 60 * 60 * 1000);
+}
 
 const cowStates = new Map();
 
@@ -136,7 +146,7 @@ async function getCowState(playerId) {
     let state = raw ? JSON.parse(raw) : { 
         milk: 0, totalMilk: 0, lastUpdate: Date.now(), 
         clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
-        lastCase: 0, unlockedSkins: ['normal'], currentSkin: 'normal'
+        nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal'
     };
     
     // Защита для старых сохранений
@@ -694,17 +704,16 @@ app.post('/api/cow/case', async (req, res) => {
 
     const state = await getCowState(playerId);
     const now = Date.now();
-    const DAY = 24 * 60 * 60 * 1000;
 
-    if (now - state.lastCase < DAY) {
-        return res.status(400).json({ success: false, error: 'Кейс еще не готов' });
+    // Если время еще не пришло — отказ
+    if (now < (state.nextCaseTime || 0)) {
+        return res.status(400).json({ success: false, error: 'Кейс еще не готов', timeLeft: state.nextCaseTime - now });
     }
 
-    // Роллим скин на сервере (чтобы нельзя было подделать)
+    // Роллим скин
     let roll = Math.random() * 100;
-    let selectedSkin = COW_SKINS[0]; // По умолчанию обычная
+    let selectedSkin = COW_SKINS[0];
     let currentChance = 0;
-
     for (const skin of COW_SKINS) {
         currentChance += skin.chance;
         if (roll <= currentChance) {
@@ -713,12 +722,12 @@ app.post('/api/cow/case', async (req, res) => {
         }
     }
 
-    // Если выпал скин, которого нет в инвентаре — добавляем
     if (!state.unlockedSkins.includes(selectedSkin.id)) {
         state.unlockedSkins.push(selectedSkin.id);
     }
 
-    state.lastCase = now;
+    // Устанавливаем время следующего открытия (00:00 МСК)
+    state.nextCaseTime = getNextMidnightMSK();
     saveCowState(playerId);
 
     res.json({ success: true, skin: selectedSkin, state });
