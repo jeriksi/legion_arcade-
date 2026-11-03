@@ -546,12 +546,18 @@ function syncCowLeaderboard(playerId, s) {
     if (!leaderboards['cowclicker']) leaderboards['cowclicker'] = [];
     const lb = leaderboards['cowclicker'];
     const existing = lb.find(x => x.playerId === playerId);
+    
+    const p = players.get(playerId);
+    const currentNickname = (p && p.nickname) ? p.nickname : 'Аноним';
+
     if (existing) {
-        if (score > existing.score) { existing.score = score; existing.date = Date.now(); isLeaderboardDirty = true; }
+        let updated = false;
+        if (score > existing.score) { existing.score = score; updated = true; }
+        if (existing.nickname !== currentNickname) { existing.nickname = currentNickname; updated = true; }
+        
+        if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
-        const p = players.get(playerId);
-        const nickname = p ? p.nickname : 'Аноним';
-        lb.push({ playerId, nickname, score, losses: 0, date: Date.now() });
+        lb.push({ playerId, nickname: currentNickname, score, losses: 0, date: Date.now() });
         isLeaderboardDirty = true;
     }
     lb.sort((a, b) => b.score - a.score);
@@ -561,6 +567,14 @@ function syncCowLeaderboard(playerId, s) {
 app.post('/api/cow/sync', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
+
+    // Сохраняем ник, если он пришел
+    const rawNickname = req.body && req.body.nickname;
+    if (rawNickname) {
+        const p = players.get(playerId);
+        if (p) p.nickname = sanitizeNickname(rawNickname);
+    }
+
     const state = await getCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, state });
