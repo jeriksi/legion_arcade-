@@ -23,18 +23,11 @@ const MAX_SESSIONS = 100000;
 const SESSION_RATE_WINDOW_MS = 60 * 1000;
 const SESSION_RATE_MAX = 20;
 
-// Неактивные аккаунты удаляются только когда размер карты перевалил
-// за половину лимита — чтобы не терять редких игроков без причины.
-const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 дней
+const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000;
 
 // ============================================================
 // БЕЛЫЙ СПИСОК ИГР
 // ============================================================
-// ВАЖНО: сервер валидирует только time-based sanity checks для соло-игр.
-// Мультиплеерные рекорды (checkers-mp, chess-mp) считаются ТОЛЬКО на сервере
-// в updateMultiplayerLeaderboard и через /api/scores от клиента НЕ принимаются.
-// Pong-мультиплеер полностью удалён с сервера. Сингл-плеерные pong_* оставлены
-// для тех клиентов, кто их ещё присылает в /api/scores.
 const GAME_RULES = {
     'mines_easy':    { lower: true,  maxScore: 3600,    minSeconds: 2 },
     'mines_mid':     { lower: true,  maxScore: 3600,    minSeconds: 2 },
@@ -57,10 +50,6 @@ const GAME_RULES = {
 // УТИЛИТЫ
 // ============================================================
 const nowMs = () => Date.now();
-
-// Ключ позиции для истории/повторов. Пустые клетки нормализуем в '.',
-// иначе разные расстановки дают одинаковую строку ('' + join).
-// Работает и для шашек (''), и для шахмат (null).
 const posKey = (pos) => pos.b.map(p => p || '.').join('') + '|' + pos.turn;
 
 function sanitizeNickname(n) {
@@ -70,8 +59,6 @@ function sanitizeNickname(n) {
         .trim() || 'Аноним';
 }
 
-// IP: по умолчанию XFF игнорируется. Включается переменной окружения
-// TRUST_PROXY=1 — только если сервер стоит за известным прокси (Render).
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 function getClientIp(req) {
     if (TRUST_PROXY) {
@@ -87,8 +74,8 @@ function getClientIp(req) {
 // ============================================================
 // ХРАНИЛИЩА
 // ============================================================
-const players = new Map();        // playerId -> { token, createdAt, lastActiveAt }
-const tokensToPlayers = new Map(); // token -> playerId
+const players = new Map();
+const tokensToPlayers = new Map();
 
 const matches = {};
 const chessMatches = {};
@@ -96,8 +83,8 @@ const matchmakingQueue = [];
 const chessQueue = [];
 
 const leaderboards = {};
-const gameSessions = new Map();         // sessionId -> { gameId, playerId, startTime }
-const playerGameSessions = new Map();   // `${playerId}:${gameId}` -> sessionId
+const gameSessions = new Map();
+const playerGameSessions = new Map();
 
 // ============================================================
 // АВТОРИЗАЦИЯ
@@ -114,8 +101,6 @@ function getAuthedPlayerId(req) {
     return playerId;
 }
 
-// Удаляем только по-настоящему старые аккаунты. Вызывается редко и
-// только когда размер карты близок к лимиту.
 function cleanupInactivePlayers(thresholdMs) {
     let removed = 0;
     for (const [playerId, p] of players.entries()) {
@@ -150,8 +135,6 @@ function checkRateLimit(key, maxReq, windowMs) {
     entry.count++;
     return entry.count <= maxReq;
 }
-// Убираем ТОЛЬКО истёкшие записи. Раньше был rateLimits.clear(),
-// который обнулял и часовые счётчики вместе с минутными.
 setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of rateLimits.entries()) {
@@ -182,12 +165,9 @@ app.use(express.json({ limit: '32kb' }));
 // ============================================================
 app.post('/api/player/register', (req, res) => {
     const ip = getClientIp(req);
-    // Не более 60 регистраций в час с одного IP (общий потолок на случай
-    // корпоративных NAT). Счётчик очищается корректно (см. выше).
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
     }
-    // Перед отказом пробуем освободить место.
     if (players.size >= MAX_PLAYERS) {
         cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
     }
@@ -202,7 +182,6 @@ app.post('/api/player/register', (req, res) => {
     res.json({ success: true, playerId, token });
 });
 
-// Периодическая уборка — только при приближении к лимиту.
 setInterval(() => {
     if (players.size > MAX_PLAYERS * 0.5) {
         cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
@@ -245,7 +224,6 @@ async function redisPipeline(commands) {
     } catch (e) { return false; }
 }
 
-// Формат хранения: HSET lb:gameId <playerId> JSON({nickname,score,losses,date})
 async function loadLeaderboardsFromDB() {
     if (!UPSTASH_URL) return;
     console.log('Загрузка рекордов из Upstash...');
@@ -324,7 +302,6 @@ app.post('/api/session/start', (req, res) => {
         return res.status(429).json({ success: false, error: 'Слишком часто. Подождите.' });
     }
 
-    // Одна активная сессия на пару (playerId, gameId) — старую инвалидируем.
     const pairKey = playerId + ':' + gameId;
     const oldSid = playerGameSessions.get(pairKey);
     if (oldSid) gameSessions.delete(oldSid);
@@ -360,8 +337,6 @@ app.post('/api/scores', (req, res) => {
     const rules = GAME_RULES[gameId];
     if (!rules) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
 
-    // Мультиплеерные рекорды считаются сервером автоматически при завершении
-    // матча. Клиент их присылать не должен — иначе это просто self-report.
     if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
         return res.status(400).json({
             success: false,
@@ -376,7 +351,6 @@ app.post('/api/scores', (req, res) => {
     }
     losses = Math.max(0, Math.floor(Number(losses)) || 0);
 
-    // Сессия ОБЯЗАТЕЛЬНА и должна принадлежать этому игроку и этой игре
     if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ success: false, error: 'Нет sessionId' });
     }
@@ -396,7 +370,6 @@ app.post('/api/scores', (req, res) => {
         if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
         return res.status(403).json({ success: false, error: 'Сессия другого игрока' });
     }
-    // Одноразовость
     gameSessions.delete(sessionId);
     const pk = playerId + ':' + gameId;
     if (playerGameSessions.get(pk) === sessionId) playerGameSessions.delete(pk);
@@ -412,7 +385,6 @@ app.post('/api/scores', (req, res) => {
         return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
     }
 
-    // Лидерборд по playerId — ник это лишь метка, подменить невозможно.
     if (!leaderboards[gameId]) leaderboards[gameId] = [];
     const lower = rules.lower;
     const existing = leaderboards[gameId].find(x => x.playerId === playerId);
@@ -458,8 +430,6 @@ function finishMatch(match, winner, reason) {
     match.finishedAt = nowMs();
 }
 
-// Серверный учёт побед/поражений в мультиплеере.
-// Клиент больше НЕ отправляет /api/scores для *-mp: всё считается здесь.
 function updateMultiplayerLeaderboard(gameId, match) {
     if (!match || !match.players || match.players.length !== 2) return;
     const winnerId = match.winner;
@@ -497,9 +467,6 @@ function finishChessMatch(match, winner, reason) {
     if (wasPlaying && winner) updateMultiplayerLeaderboard('chess-mp', match);
 }
 
-// ============================================================
-// ЕДИНАЯ ОЧЕРЕДЬ: игрок ждёт матч ТОЛЬКО в одной игре одновременно
-// ============================================================
 function removeFromOtherQueues(playerId, keepQueue) {
     if (keepQueue !== 'checkers') {
         const i = matchmakingQueue.findIndex(p => p.id === playerId);
@@ -789,6 +756,110 @@ app.post('/api/checkers/find-match', (req, res) => {
     return res.json({ success: true, status: 'waiting' });
 });
 
+app.get('/api/checkers/status', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    const m = Object.values(matches).find(x => x.status === 'playing' && x.players.some(p => p.id === playerId));
+    if (m) {
+        m.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, matchId: m.id });
+    }
+
+    const idx = matchmakingQueue.findIndex(p => p.id === playerId);
+    if (idx !== -1) {
+        const wait = nowMs() - matchmakingQueue[idx].timestamp;
+        if (wait > MATCHMAKING_TIMEOUT) {
+            matchmakingQueue.splice(idx, 1);
+            return res.json({ success: true, status: 'timeout' });
+        }
+        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(wait / 1000) });
+    }
+    return res.json({ success: true, status: 'none' });
+});
+
+app.get('/api/checkers/match/:matchId', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
+        return res.status(404).json({ success: false, error: 'Матч не найден' });
+    }
+    const m = matches[req.params.matchId];
+    if (!m.players.some(p => p.id === playerId)) {
+        return res.status(403).json({ success: false, error: 'Вы не участник' });
+    }
+
+    m.lastSeen[playerId] = nowMs();
+
+    // Дисконнект соперника — присуждаем победу тому, кто ещё стучится.
+    if (m.status === 'playing') {
+        const opp = m.players.find(p => p.id !== playerId);
+        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
+            finishCheckersMatch(m, playerId, 'disconnect');
+        }
+    }
+
+    res.json({ success: true, match: m });
+});
+
+app.post('/api/checkers/match/:matchId/move', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
+        return res.status(404).json({ success: false, error: 'Матч не найден' });
+    }
+    const m = matches[req.params.matchId];
+    if (m.status !== 'playing') return res.status(400).json({ success: false, error: 'Матч не идёт' });
+
+    const me = m.players.find(p => p.id === playerId);
+    if (!me) return res.status(403).json({ success: false, error: 'Вы не участник' });
+    if (m.gameState.turn !== me.color) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
+
+    const { move } = req.body || {};
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number'
+        || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) {
+        return res.status(400).json({ success: false, error: 'Неверный формат хода' });
+    }
+
+    const legal = CK.legal(m.gameState);
+    const found = legal.find(x => x.from === move.from && x.to === move.to);
+    if (!found) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
+
+    m.gameState = CK.make(m.gameState, found);
+    m.history.push(posKey(m.gameState));
+    m.lastSeen[playerId] = nowMs();
+
+    const oppMoves = CK.legal(m.gameState);
+    if (oppMoves.length === 0) {
+        finishCheckersMatch(m, playerId, 'no-moves');
+    } else {
+        const draw = checkDraw(m);
+        if (draw) finishCheckersMatch(m, null, draw);
+    }
+
+    res.json({ success: true, match: m });
+});
+
+app.post('/api/checkers/match/:matchId/surrender', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(matches, req.params.matchId)) {
+        return res.json({ success: true });
+    }
+    const m = matches[req.params.matchId];
+    if (!m.players.some(p => p.id === playerId)) {
+        return res.status(403).json({ success: false, error: 'Вы не участник' });
+    }
+    if (m.status !== 'playing') return res.json({ success: true });
+
+    const opp = m.players.find(p => p.id !== playerId);
+    finishCheckersMatch(m, opp ? opp.id : null, 'surrender');
+    res.json({ success: true });
+});
+
 // ============================================================
 // ШАХМАТЫ ОНЛАЙН
 // ============================================================
@@ -836,6 +907,117 @@ app.post('/api/chess/find-match', (req, res) => {
 
     chessQueue.push({ id: playerId, nickname, timestamp: nowMs() });
     return res.json({ success: true, status: 'waiting' });
+});
+
+app.get('/api/chess/status', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    const m = Object.values(chessMatches).find(x => x.status === 'playing' && x.players.some(p => p.id === playerId));
+    if (m) {
+        m.lastSeen[playerId] = nowMs();
+        return res.json({ success: true, matchId: m.id });
+    }
+
+    const idx = chessQueue.findIndex(p => p.id === playerId);
+    if (idx !== -1) {
+        const wait = nowMs() - chessQueue[idx].timestamp;
+        if (wait > MATCHMAKING_TIMEOUT) {
+            chessQueue.splice(idx, 1);
+            return res.json({ success: true, status: 'timeout' });
+        }
+        return res.json({ success: true, status: 'waiting', waitTime: Math.floor(wait / 1000) });
+    }
+    return res.json({ success: true, status: 'none' });
+});
+
+app.get('/api/chess/match/:matchId', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
+        return res.status(404).json({ success: false, error: 'Матч не найден' });
+    }
+    const m = chessMatches[req.params.matchId];
+    if (!m.players.some(p => p.id === playerId)) {
+        return res.status(403).json({ success: false, error: 'Вы не участник' });
+    }
+
+    m.lastSeen[playerId] = nowMs();
+
+    if (m.status === 'playing') {
+        const opp = m.players.find(p => p.id !== playerId);
+        if (opp && m.lastSeen[opp.id] && nowMs() - m.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
+            finishChessMatch(m, playerId, 'disconnect');
+        }
+    }
+
+    res.json({ success: true, match: m });
+});
+
+app.post('/api/chess/match/:matchId/move', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
+        return res.status(404).json({ success: false, error: 'Матч не найден' });
+    }
+    const m = chessMatches[req.params.matchId];
+    if (m.status !== 'playing') return res.status(400).json({ success: false, error: 'Матч не идёт' });
+
+    const me = m.players.find(p => p.id === playerId);
+    if (!me) return res.status(403).json({ success: false, error: 'Вы не участник' });
+    if (m.gameState.turn !== me.color) return res.status(400).json({ success: false, error: 'Сейчас не ваш ход' });
+
+    const { move } = req.body || {};
+    if (!move || typeof move.from !== 'number' || typeof move.to !== 'number'
+        || move.from < 0 || move.from > 63 || move.to < 0 || move.to > 63) {
+        return res.status(400).json({ success: false, error: 'Неверный формат хода' });
+    }
+
+    const legal = CH.legal(m.gameState);
+    const found = legal.find(x =>
+        x.from === move.from &&
+        x.to === move.to &&
+        (x.promo || null) === (move.promo || null)
+    );
+    if (!found) return res.status(400).json({ success: false, error: 'Нелегальный ход' });
+
+    m.gameState = CH.make(m.gameState, found);
+    m.history.push(CH.key(m.gameState));
+    m.lastSeen[playerId] = nowMs();
+
+    const oppMoves = CH.legal(m.gameState);
+    if (oppMoves.length === 0) {
+        if (CH.inCheck(m.gameState, m.gameState.turn)) {
+            finishChessMatch(m, playerId, 'checkmate');
+        } else {
+            finishChessMatch(m, null, 'stalemate');
+        }
+    } else {
+        const draw = checkChessDraw(m);
+        if (draw) finishChessMatch(m, null, draw);
+    }
+
+    res.json({ success: true, match: m });
+});
+
+app.post('/api/chess/match/:matchId/surrender', (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
+
+    if (!Object.prototype.hasOwnProperty.call(chessMatches, req.params.matchId)) {
+        return res.json({ success: true });
+    }
+    const m = chessMatches[req.params.matchId];
+    if (!m.players.some(p => p.id === playerId)) {
+        return res.status(403).json({ success: false, error: 'Вы не участник' });
+    }
+    if (m.status !== 'playing') return res.json({ success: true });
+
+    const opp = m.players.find(p => p.id !== playerId);
+    finishChessMatch(m, opp ? opp.id : null, 'surrender');
+    res.json({ success: true });
 });
 
 // ============================================================
