@@ -26,7 +26,7 @@ const REPEAT_LIMIT = 3;
 // Pong — 1:1 с офлайн-версией в userscript
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
 const PONG_START_COUNTDOWN = 3000;
-const PONG_GOAL_COUNTDOWN = 800;
+const PONG_GOAL_COUNTDOWN = 2000;
 const PONG_MAX_STEP_MS = 4;          // 4 мс субстеп — нет туннелирования
 const PONG_MAX_SUBSTEPS = 250;       // 1 сек / 4 мс
 const PONG_HITBOX_PAD = 6;           // ±6 px «прощения» хитбоксу (компенсация лага сети)
