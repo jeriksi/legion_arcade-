@@ -110,8 +110,8 @@ const COW_SKINS = [
 const SKIN_BONUSES = {
     normal:  { type: 'mps',      value: 0.02, desc: '+2% к производству' },
     cool:    { type: 'cp',       value: 0.03, desc: '+3% к силе клика' },
-    pink:    { type: 'crystals', value: 0.05, desc: '+5% к кристаллам' },
-    green:   { type: 'slime',    value: 0.10, desc: '+10% к награде слизня' },
+    pink:    { type: 'crystals', value: 0.10, desc: '+10% к кристаллам' }, // <--- БЫЛО 0.05
+    green:   { type: 'slime',    value: 0.10, desc: '+10% к награде Золотой коровы' },
     golden:  { type: 'mps',      value: 0.08, desc: '+8% к производству' },
     purple:  { type: 'cp',       value: 0.08, desc: '+8% к силе клика' },
     ghost:   { type: 'mps',      value: 0.15, desc: '+15% к производству' },
@@ -695,7 +695,7 @@ app.post('/api/cow/slime', async (req, res) => {
     const state = await getCowState(playerId);
     const now = Date.now();
 
-    if (now - (state.lastSlimeClick || 0) < 30000) {
+    if (now - (state.lastSlimeClick || 0) < 60000) {
         return res.status(400).json({ success: false, error: 'Слизень еще не готов' });
     }
 
