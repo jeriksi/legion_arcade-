@@ -25,10 +25,11 @@ const REPEAT_LIMIT = 3;
 
 // Pong — 1:1 с офлайн-версией в userscript
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
-const PONG_START_COUNTDOWN = 3000;   // стартовый отсчёт
-const PONG_GOAL_COUNTDOWN = 800;     // пауза после гола
-const PONG_MAX_STEP_MS = 4;        // меньше шаг → нет туннелирования
-const PONG_MAX_SUBSTEPS = 250;     // 1 сек / 4 мс
+const PONG_START_COUNTDOWN = 3000;
+const PONG_GOAL_COUNTDOWN = 800;
+const PONG_MAX_STEP_MS = 4;          // 4 мс субстеп — нет туннелирования
+const PONG_MAX_SUBSTEPS = 250;       // 1 сек / 4 мс
+const PONG_HITBOX_PAD = 6;           // ±6 px «прощения» хитбоксу (компенсация лага сети)
 
 // ============================================================
 // ХРАНИЛИЩА
@@ -74,7 +75,6 @@ function checkChessDraw(match) {
     return null;
 }
 
-// Сброс мяча в центр с нулевой скоростью (аналог offline startRound)
 function resetBall(room) {
     room.ball = {
         x: PONG_W / 2 - PONG_BS / 2,
@@ -84,7 +84,6 @@ function resetBall(room) {
     };
 }
 
-// Случайная начальная скорость (аналог offline после отсчёта)
 function randomizePongVelocity(room) {
     const dirX = Math.random() > 0.5 ? 1 : -1;
     const dirY = Math.random() > 0.5 ? 1 : -1;
@@ -366,6 +365,7 @@ app.post('/api/pong/find-match', (req, res) => {
 
 app.get('/api/pong/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
+    // Возвращаем и countdown-комнаты — иначе второй игрок не увидит отсчёт
     const room = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (room) {
         if (room.lastSeen) room.lastSeen[playerId] = nowMs();
@@ -392,15 +392,19 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     const playerId = req.query.playerId;
     if (playerId && room.lastSeen) room.lastSeen[playerId] = nowMs();
 
+    // Позиция ракетки передаётся прямо в poll — 1 запрос вместо 2
+    const paddleYQuery = req.query.paddleY;
+    if (playerId && paddleYQuery !== undefined && paddleYQuery !== '') {
+        const me = room.players.find(p => p.id === playerId);
+        if (me) {
+            const y = Number(paddleYQuery);
+            if (!isNaN(y)) me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
+        }
+    }
+
     const me = playerId ? room.players.find(p => p.id === playerId) : null;
     const playerIndex = me ? room.players.indexOf(me) : -1;
-    
-    // Позволяем клиенту передавать позицию ракетки прямо в poll — меньше запросов
-    const paddleYQuery = req.query.paddleY;
-    if (playerId && paddleYQuery !== undefined) {
-        const me = room.players.find(p => p.id === playerId);
-        if (me) me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, Number(paddleYQuery)));
-    }
+
     let now = nowMs();
 
     // 1) Countdown → playing
@@ -408,10 +412,10 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         room.state = 'playing';
         room.countdownIsInitial = false;
         randomizePongVelocity(room);
-        room.lastTick = room.countdownEnd; // начинаем физику «с момента конца отсчёта»
+        room.lastTick = room.countdownEnd;
     }
 
-    // 2) Отключение соперника (и в игре, и в отсчёте)
+    // 2) Отключение соперника
     if ((room.state === 'playing' || room.state === 'countdown') && playerId) {
         const opp = room.players.find(p => p.id !== playerId);
         if (opp && room.lastSeen[opp.id] && now - room.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
@@ -421,9 +425,9 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         }
     }
 
-    // 3) Физика (с субстепами — лечит «туннелирование» и «кривые хитбоксы»)
+    // 3) Физика с субстепами 4 мс + расширенный хитбокс
     if (room.state === 'playing') {
-        const realDt = Math.min(now - room.lastTick, 1000); // не более 1 сек симуляции
+        const realDt = Math.min(now - room.lastTick, 1000);
         room.lastTick = now;
 
         const substeps = Math.min(PONG_MAX_SUBSTEPS, Math.max(1, Math.ceil(realDt / PONG_MAX_STEP_MS)));
@@ -439,10 +443,12 @@ app.get('/api/pong/room/:roomId', (req, res) => {
             if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
             else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
 
-            // Левая ракетка (paddleY = центр, p1Top = верх)
+            const HIT = PONG_HITBOX_PAD;
+
+            // Левая ракетка
             const p1Top = room.players[0].paddleY - PONG_PH / 2;
             if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
-                if (room.ball.y + PONG_BS >= p1Top && room.ball.y <= p1Top + PONG_PH) {
+                if (room.ball.y + PONG_BS >= p1Top - HIT && room.ball.y <= p1Top + PONG_PH + HIT) {
                     room.ball.x = PONG_PW;
                     room.ball.vx *= -1.1;
                     room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[0].paddleY) / PONG_PH) * 10;
@@ -451,7 +457,7 @@ app.get('/api/pong/room/:roomId', (req, res) => {
             // Правая ракетка
             const p2Top = room.players[1].paddleY - PONG_PH / 2;
             if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
-                if (room.ball.y + PONG_BS >= p2Top && room.ball.y <= p2Top + PONG_PH) {
+                if (room.ball.y + PONG_BS >= p2Top - HIT && room.ball.y <= p2Top + PONG_PH + HIT) {
                     room.ball.x = PONG_W - PONG_PW - PONG_BS;
                     room.ball.vx *= -1.1;
                     room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[1].paddleY) / PONG_PH) * 10;
@@ -577,7 +583,6 @@ setInterval(() => {
             if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
             continue;
         }
-        // playing или countdown — брошенная комната, если оба молчат
         if (r.players.length === 2) {
             const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
             const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
