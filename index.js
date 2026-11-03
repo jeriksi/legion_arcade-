@@ -7,14 +7,6 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 // ДОВЕРИЕ К ОБРАТНОМУ ПРОКСИ
 // ============================================================
-// Если приложение стоит за одним обратным прокси (Render, Heroku и т.п.),
-// включайте TRUST_PROXY=1 в переменных окружения хостинга.
-// Express сам корректно разберёт X-Forwarded-For через пакет proxy-addr:
-// берёт не «первый» (легко подделывается клиентом), а ближайший
-// недоверенный хоп. req.ip тогда становится реальным IP клиента.
-// Если TRUST_PROXY выключен — req.ip = адрес прямого сокета, что
-// тоже честно: за прокси все клиенты получат один общий лимит,
-// но зато никто не сможет его обойти подделкой заголовка.
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 app.set('trust proxy', TRUST_PROXY ? 1 : false);
 
@@ -40,7 +32,7 @@ const SESSION_RATE_MAX = 20;
 const PLAYER_INACTIVE_TTL = 30 * 24 * 60 * 60 * 1000;
 
 // ============================================================
-// КОНФИГУРАЦИЯ КЛИКЕРА (для серверных расчётов)
+// КОНФИГУРАЦИЯ КЛИКЕРА
 // ============================================================
 const COW_CONFIG = {
     clickUps: [
@@ -90,7 +82,7 @@ const COW_CONFIG = {
     prestigeMult: 1.5,
 };
 
-const cowStates = new Map(); // Кэш активных игроков в памяти
+const cowStates = new Map();
 
 function calcCowMath(s) {
     let achBonus = 0;
@@ -121,7 +113,6 @@ function calcCowMath(s) {
 
 function tickCow(s) {
     const now = Date.now();
-    // Ограничиваем оффлайн-доход 24 часами, чтобы не фармили вечность
     const dt = Math.max(0, Math.min(24 * 3600, (now - (s.lastUpdate || now)) / 1000));
     const { mps } = calcCowMath(s);
     s.milk += mps * dt;
@@ -256,7 +247,6 @@ setInterval(() => {
 }, 60 * 1000).unref?.();
 
 app.use((req, res, next) => {
-    // req.ip — корректный IP клиента с учётом настройки trust proxy.
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('ip:' + ip, 150, 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много запросов. Подождите.' });
@@ -277,7 +267,7 @@ app.use(express.json({ limit: '32kb' }));
 // ============================================================
 // РЕГИСТРАЦИЯ ИГРОКА
 // ============================================================
-app.post('/api/player/register', (req, res) => {
+app.post('/api/player/register', async (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
         return res.status(429).json({ success: false, error: 'Слишком много регистраций. Подождите.' });
@@ -293,12 +283,13 @@ app.post('/api/player/register', (req, res) => {
     const now = nowMs();
     players.set(playerId, { token, createdAt: now, lastActiveAt: now });
     tokensToPlayers.set(token, playerId);
+
+    // Сохраняем в Redis для персистентности
+    await redis('HSET', 'players_db', token, JSON.stringify({ playerId, createdAt: now, lastActiveAt: now }));
+
     res.json({ success: true, playerId, token });
 });
 
-// Чистим неактивных игроков ежечасно, независимо от их количества.
-// Раньше порог был players.size > MAX_PLAYERS * 0.5, из-за чего при
-// небольшой базе записи жили вечно.
 setInterval(() => {
     cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
 }, 60 * 60 * 1000).unref?.();
@@ -341,7 +332,23 @@ async function redisPipeline(commands) {
 
 async function loadLeaderboardsFromDB() {
     if (!UPSTASH_URL) return;
-    console.log('Загрузка рекордов из Upstash...');
+    console.log('Загрузка данных из Upstash...');
+
+    // Загружаем игроков
+    const allPlayers = await redis('HGETALL', 'players_db');
+    if (Array.isArray(allPlayers)) {
+        for (let i = 0; i < allPlayers.length; i += 2) {
+            const token = allPlayers[i];
+            try {
+                const data = JSON.parse(allPlayers[i + 1]);
+                players.set(data.playerId, { token, createdAt: data.createdAt, lastActiveAt: data.lastActiveAt, nickname: data.nickname });
+                tokensToPlayers.set(token, data.playerId);
+            } catch (e) {}
+        }
+    }
+    console.log(`Загружено игроков: ${players.size}`);
+
+    // Загружаем рекорды
     for (const gameId of Object.keys(GAME_RULES)) {
         const key = `lb:${gameId}`;
         const all = await redis('HGETALL', key);
@@ -394,8 +401,14 @@ async function flushLeaderboardsToDB() {
 
 setInterval(flushLeaderboardsToDB, 60 * 1000).unref?.();
 process.on('SIGTERM', async () => {
-    console.log('Сервер выключается, сохраняем рекорды...');
+    console.log('Сервер выключается, сохраняем данные...');
     await flushLeaderboardsToDB();
+    
+    // Сохраняем активных игроков кликера
+    for (const pid of cowStates.keys()) {
+        await saveCowState(pid);
+    }
+    
     process.exit(0);
 });
 
@@ -452,7 +465,7 @@ app.post('/api/scores', (req, res) => {
     const rules = GAME_RULES[gameId];
     if (!rules) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
 
-        if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
+    if (gameId === 'checkers-mp' || gameId === 'chess-mp') {
         return res.status(400).json({
             success: false,
             error: 'Рекорды этой игры учитываются сервером автоматически'
@@ -461,7 +474,7 @@ app.post('/api/scores', (req, res) => {
     if (gameId === 'cowclicker') {
         return res.status(400).json({ success: false, error: 'Рекорды кликера считаются автоматически на сервере' });
     }
-    
+
     nickname = sanitizeNickname(nickname);
     score = Math.floor(Number(score));
     if (isNaN(score) || score < 0 || score > rules.maxScore) {
@@ -498,7 +511,6 @@ app.post('/api/scores', (req, res) => {
     else if (gameId.startsWith('snake_')) minSeconds = Math.max(minSeconds, score * 0.1);
     else if (gameId === 'match3')       minSeconds = Math.max(minSeconds, score * 0.05);
     else if (gameId.startsWith('pong_')) minSeconds = Math.max(minSeconds, score * 15);
-    else if (gameId === 'cowclicker')   minSeconds = Math.max(minSeconds, score / 100000);
     
     if (elapsedSeconds < minSeconds) {
         return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
@@ -539,7 +551,7 @@ app.get('/api/scores/:gameId', (req, res) => {
 });
 
 // ============================================================
-// API КЛИКЕРА (Серверный античит)
+// API КЛИКЕРА
 // ============================================================
 function syncCowLeaderboard(playerId, s) {
     const score = Math.floor(s.totalMilk);
@@ -554,7 +566,6 @@ function syncCowLeaderboard(playerId, s) {
         let updated = false;
         if (score > existing.score) { existing.score = score; updated = true; }
         if (existing.nickname !== currentNickname) { existing.nickname = currentNickname; updated = true; }
-        
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
         lb.push({ playerId, nickname: currentNickname, score, losses: 0, date: Date.now() });
@@ -568,11 +579,13 @@ app.post('/api/cow/sync', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
 
-    // Сохраняем ник, если он пришел
     const rawNickname = req.body && req.body.nickname;
     if (rawNickname) {
         const p = players.get(playerId);
-        if (p) p.nickname = sanitizeNickname(rawNickname);
+        if (p) {
+            p.nickname = sanitizeNickname(rawNickname);
+            await redis('HSET', 'players_db', p.token, JSON.stringify({ playerId, createdAt: p.createdAt, lastActiveAt: p.lastActiveAt, nickname: p.nickname }));
+        }
     }
 
     const state = await getCowState(playerId);
@@ -590,7 +603,6 @@ app.post('/api/cow/click', async (req, res) => {
     const now = Date.now();
     const timeDiff = (now - (state.lastClickTime || now - 1000)) / 1000;
     
-    // Античит: максимум 20 кликов в секунду
     if (clicks > timeDiff * 20 + 5) {
         return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
     }
@@ -608,7 +620,9 @@ app.post('/api/cow/click', async (req, res) => {
 app.post('/api/cow/buy', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
-    const { type, id, qty } = req.body;
+    const { type, id } = req.body;
+    let { qty } = req.body;
+    
     if (!qty || typeof qty !== 'number' || qty <= 0) return res.status(400).json({ success: false });
     
     const state = await getCowState(playerId);
@@ -639,6 +653,7 @@ app.post('/api/cow/buy', async (req, res) => {
         state.clickUps[id] = owned + qty;
     }
     else if (type === 'mult') {
+        qty = 1; // Множители покупаются только по 1
         const cfg = COW_CONFIG.mults.find(m => m.id === id);
         if (!cfg || state.multipliers[id]) return res.status(400).json({ success: false });
         if (state.milk < cfg.cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
