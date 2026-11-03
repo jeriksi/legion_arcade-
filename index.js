@@ -27,8 +27,8 @@ const REPEAT_LIMIT = 3;
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
 const PONG_START_COUNTDOWN = 3000;   // стартовый отсчёт
 const PONG_GOAL_COUNTDOWN = 800;     // пауза после гола
-const PONG_MAX_STEP_MS = 16.66;      // 1 субстеп = 1 кадр
-const PONG_MAX_SUBSTEPS = 60;        // max 1 сек симуляции за один poll
+const PONG_MAX_STEP_MS = 4;        // меньше шаг → нет туннелирования
+const PONG_MAX_SUBSTEPS = 250;     // 1 сек / 4 мс
 
 // ============================================================
 // ХРАНИЛИЩА
@@ -366,7 +366,7 @@ app.post('/api/pong/find-match', (req, res) => {
 
 app.get('/api/pong/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
-    const room = Object.values(pongRooms).find(r => r.state === 'playing' && r.players.some(p => p.id === playerId));
+    const room = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (room) {
         if (room.lastSeen) room.lastSeen[playerId] = nowMs();
         const me = room.players.find(p => p.id === playerId);
@@ -394,7 +394,13 @@ app.get('/api/pong/room/:roomId', (req, res) => {
 
     const me = playerId ? room.players.find(p => p.id === playerId) : null;
     const playerIndex = me ? room.players.indexOf(me) : -1;
-
+    
+    // Позволяем клиенту передавать позицию ракетки прямо в poll — меньше запросов
+    const paddleYQuery = req.query.paddleY;
+    if (playerId && paddleYQuery !== undefined) {
+        const me = room.players.find(p => p.id === playerId);
+        if (me) me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, Number(paddleYQuery)));
+    }
     let now = nowMs();
 
     // 1) Countdown → playing
