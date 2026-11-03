@@ -4,7 +4,32 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ============================================================
+// ЗАЩИТА ОТ СПАМА (RATE LIMIT)
+// ============================================================
+const rateLimits = new Map();
+function checkRateLimit(ip, maxReq, windowMs) {
+    const now = Date.now();
+    const entry = rateLimits.get(ip) || { count: 0, reset: now + windowMs };
+    if (now > entry.reset) { entry.count = 0; entry.reset = now + windowMs; }
+    entry.count++;
+    rateLimits.set(ip, entry);
+    return entry.count <= maxReq;
+}
+
 app.use(express.json());
+
+app.use((req, res, next) => {
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+    // Для Пинг-понга лимит 2500 (30 запросов/сек * 60 сек = 1800)
+    // Для остальных API 150 запросов в минуту
+    const maxReq = req.path.startsWith('/api/pong/') ? 2500 : 150;
+    if (!checkRateLimit(ip, maxReq, 60 * 1000)) {
+        return res.status(429).json({ success: false, error: 'Слишком много запросов. Подождите.' });
+    }
+    next();
+});
+
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
@@ -23,13 +48,12 @@ const ABANDONED_MATCH_TTL = 5 * 60 * 1000;
 const DRAW_HM_LIMIT = 30;
 const REPEAT_LIMIT = 3;
 
-// Pong — 1:1 с офлайн-версией в userscript
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
-const PONG_START_COUNTDOWN = 3000;   // стартовый отсчёт (мс)
-const PONG_GOAL_COUNTDOWN = 800;     // пауза после гола (мс)
-const PONG_MAX_STEP_MS = 4;          // 4 мс субстеп — нет туннелирования
-const PONG_MAX_SUBSTEPS = 250;       // 1 сек / 4 мс
-const PONG_HITBOX_PAD = 6;           // ±6 px «прощения» хитбоксу (компенсация лага сети)
+const PONG_START_COUNTDOWN = 3000;
+const PONG_GOAL_COUNTDOWN = 800;
+const PONG_MAX_STEP_MS = 4;
+const PONG_MAX_SUBSTEPS = 250;
+const PONG_HITBOX_PAD = 6;
 
 // ============================================================
 // ХРАНИЛИЩА
@@ -40,10 +64,9 @@ const matchmakingQueue = [];
 const chessQueue = [];
 const pongRooms = {};
 const pongQueue = [];
-// Fallback лидерборд (если не настроен Upstash)
-const leaderboards = {
-    mines: [], tetris: [], match3: [], snake: [], pong: [], chess: [], checkers: [], 'checkers-mp': [], 'chess-mp': []
-};
+
+const leaderboards = {}; // In-memory кэш рекордов
+const gameSessions = new Map(); // Сессии для античита
 
 // ============================================================
 // УТИЛИТЫ
@@ -77,12 +100,7 @@ function checkChessDraw(match) {
 }
 
 function resetBall(room) {
-    room.ball = {
-        x: PONG_W / 2 - PONG_BS / 2,
-        y: PONG_H / 2 - PONG_BS / 2,
-        vx: 0,
-        vy: 0
-    };
+    room.ball = { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 };
 }
 
 function randomizePongVelocity(room) {
@@ -105,17 +123,13 @@ const CK = (() => {
         for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) {
             if (((r + c) & 1) === 0) continue;
             const i = r * 8 + c;
-            if (r < 3) b[i] = 'b';
-            else if (r > 4) b[i] = 'w';
+            if (r < 3) b[i] = 'b'; else if (r > 4) b[i] = 'w';
         }
         return { b, turn: 'w', hm: 0 };
     }
 
     function genCaps(b, sq, piece, captured, path) {
-        const r = sq >> 3, c = sq & 7;
-        const myColor = colorOf(piece);
-        const myKing = isKing(piece);
-        const results = [];
+        const r = sq >> 3, c = sq & 7, myColor = colorOf(piece), myKing = isKing(piece), results = [];
         let extended = false;
 
         for (const [dr, dc] of DIRS) {
@@ -153,33 +167,27 @@ const CK = (() => {
                 extended = true;
                 const nc2 = new Set(captured); nc2.add(mSq);
                 let newPiece = piece;
-                if ((myColor === 'w' && lr === 0) || (myColor === 'b' && lr === 7))
-                    newPiece = myColor === 'w' ? 'W' : 'B';
+                if ((myColor === 'w' && lr === 0) || (myColor === 'b' && lr === 7)) newPiece = myColor === 'w' ? 'W' : 'B';
                 results.push(...genCaps(b, lSq, newPiece, nc2, [...path, lSq]));
             }
         }
 
-        if (!extended && captured.size > 0) {
-            return [{ from: path[0], to: sq, captures: [...captured], path, piece }];
-        }
+        if (!extended && captured.size > 0) return [{ from: path[0], to: sq, captures: [...captured], path, piece }];
         return results;
     }
 
     function genSimple(b, turn) {
         const moves = [];
         for (let i = 0; i < 64; i++) {
-            const p = b[i];
-            if (!p || colorOf(p) !== turn) continue;
+            const p = b[i]; if (!p || colorOf(p) !== turn) continue;
             const r = i >> 3, c = i & 7;
             if (isKing(p)) {
-                for (const [dr, dc] of DIRS) {
-                    for (let d = 1; ; d++) {
-                        const nr = r + dr * d, nc = c + dc * d;
-                        if (nr < 0 || nr > 7 || nc < 0 || nc > 7) break;
-                        const nSq = nr * 8 + nc;
-                        if (b[nSq]) break;
-                        moves.push({ from: i, to: nSq, captures: [], path: [i, nSq], piece: p });
-                    }
+                for (const [dr, dc] of DIRS) for (let d = 1; ; d++) {
+                    const nr = r + dr * d, nc = c + dc * d;
+                    if (nr < 0 || nr > 7 || nc < 0 || nc > 7) break;
+                    const nSq = nr * 8 + nc;
+                    if (b[nSq]) break;
+                    moves.push({ from: i, to: nSq, captures: [], path: [i, nSq], piece: p });
                 }
             } else {
                 const fwd = turn === 'w' ? -1 : 1;
@@ -189,8 +197,7 @@ const CK = (() => {
                     const nSq = nr * 8 + nc;
                     if (b[nSq]) continue;
                     let newPiece = p;
-                    if ((turn === 'w' && nr === 0) || (turn === 'b' && nr === 7))
-                        newPiece = turn === 'w' ? 'W' : 'B';
+                    if ((turn === 'w' && nr === 0) || (turn === 'b' && nr === 7)) newPiece = turn === 'w' ? 'W' : 'B';
                     moves.push({ from: i, to: nSq, captures: [], path: [i, nSq], piece: newPiece });
                 }
             }
@@ -205,18 +212,15 @@ const CK = (() => {
             if (!p || colorOf(p) !== pos.turn) continue;
             caps.push(...genCaps(pos.b, i, p, new Set(), [i]));
         }
-        if (caps.length > 0) return caps;
-        return genSimple(pos.b, pos.turn);
+        return caps.length > 0 ? caps : genSimple(pos.b, pos.turn);
     }
 
     function make(pos, m) {
         const b = [...pos.b];
         for (const sq of m.captures) b[sq] = '';
-        b[m.from] = '';
-        b[m.to] = m.piece;
+        b[m.from] = ''; b[m.to] = m.piece;
         let hm = pos.hm;
-        if (m.captures.length > 0 || !isKing(pos.b[m.from])) hm = 0;
-        else hm++;
+        if (m.captures.length > 0 || !isKing(pos.b[m.from])) hm = 0; else hm++;
         return { b, turn: pos.turn === 'w' ? 'b' : 'w', hm };
     }
 
@@ -321,14 +325,195 @@ const CH = (() => {
 })();
 
 // ============================================================
-// API ПИНГ-ПОНГ ОНЛАЙН (HTTP Polling, физика = офлайн-версия)
+// ЛИДЕРБОРД И АНТИЧИТ (In-Memory Cache + Sync в Upstash)
+// ============================================================
+const UPSTASH_URL = process.env.UPSTASH_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
+let isLeaderboardDirty = false;
+
+async function redis(...args) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+    try {
+        const res = await fetch(UPSTASH_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(args)
+        });
+        if (!res.ok) { console.error('Redis HTTP', res.status); return null; }
+        const data = await res.json();
+        return data.result;
+    } catch (e) {
+        console.error('Redis error:', e.message);
+        return null;
+    }
+}
+
+async function redisPipeline(commands) {
+    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+    try {
+        const res = await fetch(UPSTASH_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(commands)
+        });
+        return res.ok;
+    } catch (e) { return false; }
+}
+
+async function loadLeaderboardsFromDB() {
+    if (!UPSTASH_URL) return;
+    console.log('Загрузка рекордов из Upstash...');
+    
+    const gameIds = [
+        'mines_easy', 'mines_mid', 'mines_hard', 'tetris', 'match3', 
+        'snake_classic', 'snake_wrap', 'snake_maze', 'pong_easy', 'pong_mid', 'pong_hard',
+        'checkers', 'chess', 'checkers-mp', 'chess-mp'
+    ];
+
+    for (const gameId of gameIds) {
+        const key = `lb:${gameId}`;
+        const all = await redis('HGETALL', key);
+        
+        if (Array.isArray(all) && all.length > 0) {
+            const scores = [];
+            for (let i = 0; i < all.length; i += 2) {
+                try {
+                    const v = JSON.parse(all[i + 1]);
+                    scores.push({ nickname: all[i], score: v.score, losses: v.losses || 0, date: v.date || 0 });
+                } catch (_) {}
+            }
+            const isLower = gameId.startsWith('mines');
+            scores.sort((a, b) => isLower ? a.score - b.score : b.score - a.score);
+            leaderboards[gameId] = scores.slice(0, 10);
+        }
+    }
+    console.log('Рекорды успешно загружены в память.');
+}
+
+async function flushLeaderboardsToDB() {
+    if (!UPSTASH_URL || !isLeaderboardDirty) return;
+    console.log('Синхронизация рекордов с базой...');
+    isLeaderboardDirty = false;
+
+    const commands = [];
+    for (const gameId of Object.keys(leaderboards)) {
+        const scores = leaderboards[gameId];
+        if (!scores || scores.length === 0) continue;
+
+        const key = `lb:${gameId}`;
+        commands.push(['DEL', key]);
+        
+        const hsetArgs = ['HSET', key];
+        for (const s of scores) {
+            hsetArgs.push(s.nickname, JSON.stringify({ score: s.score, losses: s.losses || 0, date: s.date }));
+        }
+        commands.push(hsetArgs);
+    }
+    
+    if (commands.length > 0) await redisPipeline(commands);
+    console.log('Синхронизация завершена.');
+}
+
+// Запускаем фоновую запись раз в минуту
+setInterval(flushLeaderboardsToDB, 60 * 1000);
+
+// Попытка сохранить при выключении (Render присылает SIGTERM)
+process.on('SIGTERM', async () => {
+    console.log('Сервер выключается, сохраняем рекорды...');
+    await flushLeaderboardsToDB();
+    process.exit(0);
+});
+
+// ============================================================
+// API СЕССИЙ (АНТИЧИТ)
+// ============================================================
+app.post('/api/session/start', (req, res) => {
+    const { gameId } = req.body;
+    if (!gameId) return res.status(400).json({ success: false });
+    
+    const sessionId = crypto.randomUUID();
+    gameSessions.set(sessionId, { gameId, startTime: Date.now() });
+    
+    // Очистка старых сессий (старше 2 часов)
+    const now = Date.now();
+    for (const [id, s] of gameSessions.entries()) {
+        if (now - s.startTime > 2 * 60 * 60 * 1000) gameSessions.delete(id);
+    }
+    
+    res.json({ success: true, sessionId });
+});
+
+app.post('/api/scores', (req, res) => {
+    let { gameId, nickname, score, lowerIsBetter, losses = 0, sessionId } = req.body;
+    if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
+
+    // 🛡️ АНТИЧИТ: ПРОВЕРКА СЕССИИ
+    const session = gameSessions.get(sessionId);
+    if (!session) return res.status(400).json({ success: false, error: 'Сессия не найдена. Играйте через клиент.' });
+    if (session.gameId !== gameId) return res.status(400).json({ success: false, error: 'Несовпадение игры' });
+    
+    gameSessions.delete(sessionId); // Удаляем, чтобы нельзя было отправить один и тот же результат дважды
+
+    const elapsedSeconds = (Date.now() - session.startTime) / 1000;
+    let minSeconds = 0;
+
+    // Проверка адекватности времени (Античит)
+    if (gameId === 'tetris') minSeconds = score * 0.2; // 200 очков = 40 сек
+    else if (gameId.startsWith('snake_')) minSeconds = score * 0.1; // 100 очков = 10 сек
+    else if (gameId === 'match3') minSeconds = score * 0.05;
+    else if (gameId.startsWith('pong_')) minSeconds = score * 15; // 1 серия = 15 сек
+    else if (gameId.startsWith('mines_')) minSeconds = 2; // В сапере минимум 2 секунды
+
+    if (elapsedSeconds < minSeconds) {
+        return res.status(400).json({ success: false, error: 'Подозрительно быстро. Античит заблокировал рекорд.' });
+    }
+
+    // Санитайзинг
+    nickname = String(nickname || 'Игрок').replace(/[<>&"']/g, '').substring(0, 20).trim();
+    if (!nickname) nickname = 'Аноним';
+    score = Math.floor(Number(score));
+    if (isNaN(score) || score < 0 || score > 1000000) return res.status(400).json({ success: false, error: 'Неверный счет' });
+    losses = Math.floor(Number(losses)) || 0;
+
+    // Обновляем память
+    if (!leaderboards[gameId]) leaderboards[gameId] = [];
+    let existing = leaderboards[gameId].find(x => x.nickname === nickname);
+
+    if (existing) {
+        let updated = false;
+        if (lowerIsBetter) {
+            if (score < existing.score) { existing.score = score; updated = true; }
+        } else {
+            if (score > existing.score) { existing.score = score; updated = true; }
+        }
+        if (losses > (existing.losses || 0)) { existing.losses = losses; updated = true; }
+        
+        if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
+    } else {
+        leaderboards[gameId].push({ nickname, score, losses, date: Date.now() });
+        isLeaderboardDirty = true;
+    }
+
+    leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
+    leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
+
+    res.json({ success: true });
+});
+
+app.get('/api/scores/:gameId', (req, res) => {
+    const scores = (leaderboards[req.params.gameId] || []).slice(0, 10);
+    res.json({ success: true, scores });
+});
+
+
+// ============================================================
+// API ПИНГ-ПОНГ ОНЛАЙН
 // ============================================================
 app.post('/api/pong/find-match', (req, res) => {
     const { playerId, nickname } = req.body;
     if (!playerId) return res.status(400).json({ success: false, error: 'Нет playerId' });
 
-    const activeRoom = Object.values(pongRooms).find(r =>
-        r.state !== 'finished' && r.players.some(p => p.id === playerId));
+    const activeRoom = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (activeRoom) {
         if (activeRoom.lastSeen) activeRoom.lastSeen[playerId] = nowMs();
         const me = activeRoom.players.find(p => p.id === playerId);
@@ -366,7 +551,6 @@ app.post('/api/pong/find-match', (req, res) => {
 
 app.get('/api/pong/status/:playerId', (req, res) => {
     const playerId = req.params.playerId;
-    // Возвращаем и countdown-комнаты — иначе второй игрок не увидит отсчёт
     const room = Object.values(pongRooms).find(r => r.state !== 'finished' && r.players.some(p => p.id === playerId));
     if (room) {
         if (room.lastSeen) room.lastSeen[playerId] = nowMs();
@@ -392,14 +576,19 @@ app.get('/api/pong/room/:roomId', (req, res) => {
 
     const playerId = req.query.playerId;
     if (playerId && room.lastSeen) room.lastSeen[playerId] = nowMs();
-
-    // Позиция ракетки передаётся прямо в poll — 1 запрос вместо 2
+    
     const paddleYQuery = req.query.paddleY;
     if (playerId && paddleYQuery !== undefined && paddleYQuery !== '') {
         const me = room.players.find(p => p.id === playerId);
         if (me) {
             const y = Number(paddleYQuery);
-            if (!isNaN(y)) me.paddleY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
+            if (!isNaN(y)) {
+                const targetY = Math.max(PONG_PH / 2, Math.min(PONG_H - PONG_PH / 2, y));
+                const diff = targetY - me.paddleY;
+                const maxMove = 60; // Защита от телепортации ракетки
+                if (Math.abs(diff) > maxMove) me.paddleY += Math.sign(diff) * maxMove;
+                else me.paddleY = targetY;
+            }
         }
     }
 
@@ -408,7 +597,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
 
     let now = nowMs();
 
-    // 1) Countdown → playing
     if (room.state === 'countdown' && now >= room.countdownEnd) {
         room.state = 'playing';
         room.countdownIsInitial = false;
@@ -416,7 +604,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         room.lastTick = room.countdownEnd;
     }
 
-    // 2) Отключение соперника
     if ((room.state === 'playing' || room.state === 'countdown') && playerId) {
         const opp = room.players.find(p => p.id !== playerId);
         if (opp && room.lastSeen[opp.id] && now - room.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
@@ -426,7 +613,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
         }
     }
 
-    // 3) Физика с субстепами 4 мс + расширенный хитбокс
     if (room.state === 'playing') {
         const realDt = Math.min(now - room.lastTick, 1000);
         room.lastTick = now;
@@ -436,17 +622,13 @@ app.get('/api/pong/room/:roomId', (req, res) => {
 
         for (let s = 0; s < substeps; s++) {
             const dt = dtPerStep / 16.66;
-
             room.ball.x += room.ball.vx * dt;
             room.ball.y += room.ball.vy * dt;
 
-            // Стены
             if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
             else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
 
             const HIT = PONG_HITBOX_PAD;
-
-            // Левая ракетка
             const p1Top = room.players[0].paddleY - PONG_PH / 2;
             if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
                 if (room.ball.y + PONG_BS >= p1Top - HIT && room.ball.y <= p1Top + PONG_PH + HIT) {
@@ -455,7 +637,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
                     room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[0].paddleY) / PONG_PH) * 10;
                 }
             }
-            // Правая ракетка
             const p2Top = room.players[1].paddleY - PONG_PH / 2;
             if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
                 if (room.ball.y + PONG_BS >= p2Top - HIT && room.ball.y <= p2Top + PONG_PH + HIT) {
@@ -465,11 +646,9 @@ app.get('/api/pong/room/:roomId', (req, res) => {
                 }
             }
 
-            // Ограничение скорости
             room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
             room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
 
-            // Гол
             if (room.ball.x < 0) {
                 room.score.p2++;
                 resetBall(room);
@@ -489,7 +668,6 @@ app.get('/api/pong/room/:roomId', (req, res) => {
             }
         }
 
-        // Победа
         if (room.score.p1 >= PONG_WIN || room.score.p2 >= PONG_WIN) {
             room.state = 'finished';
             room.winner = room.score.p1 >= PONG_WIN ? 0 : 1;
@@ -538,63 +716,6 @@ app.post('/api/pong/room/:roomId/leave', (req, res) => {
     }
     res.json({ success: true });
 });
-
-// ============================================================
-// ФОНОВАЯ ОЧИСТКА
-// ============================================================
-setInterval(() => {
-    const now = nowMs();
-
-    // ШАШКИ
-    for (const id of Object.keys(matches)) {
-        const m = matches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
-            delete matches[id]; continue;
-        }
-        if (m.status === 'playing') {
-            const seenA = m.lastSeen[m.players[0].id] || 0;
-            const seenB = m.lastSeen[m.players[1].id] || 0;
-            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete matches[id];
-        }
-    }
-    for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
-        if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
-    }
-
-    // ШАХМАТЫ
-    for (const id of Object.keys(chessMatches)) {
-        const m = chessMatches[id];
-        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) {
-            delete chessMatches[id]; continue;
-        }
-        if (m.status === 'playing') {
-            const seenA = m.lastSeen[m.players[0].id] || 0;
-            const seenB = m.lastSeen[m.players[1].id] || 0;
-            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete chessMatches[id];
-        }
-    }
-    for (let i = chessQueue.length - 1; i >= 0; i--) {
-        if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
-    }
-
-    // ПИНГ-ПОНГ
-    for (const id of Object.keys(pongRooms)) {
-        const r = pongRooms[id];
-        if (r.state === 'finished') {
-            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
-            continue;
-        }
-        if (r.players.length === 2) {
-            const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
-            const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
-            const bothStale = (now - seenA > DISCONNECT_TIMEOUT) && (now - seenB > DISCONNECT_TIMEOUT);
-            if (bothStale) delete pongRooms[id];
-        }
-    }
-    for (let i = pongQueue.length - 1; i >= 0; i--) {
-        if (now - pongQueue[i].timestamp > MATCHMAKING_TIMEOUT) pongQueue.splice(i, 1);
-    }
-}, 30 * 1000);
 
 // ============================================================
 // API ШАШКИ ОНЛАЙН
@@ -690,12 +811,9 @@ app.post('/api/checkers/match/:id/move', (req, res) => {
     match.history.push(posKey(match.gameState));
 
     const nextMoves = CK.legal(match.gameState);
-    if (nextMoves.length === 0) {
-        finishMatch(match, playerId, 'no-moves');
-    } else {
-        const drawReason = checkDraw(match);
-        if (drawReason) finishMatch(match, null, drawReason);
-    }
+    if (nextMoves.length === 0) finishMatch(match, playerId, 'no-moves');
+    else { const drawReason = checkDraw(match); if (drawReason) finishMatch(match, null, drawReason); }
+    
     res.json({ success: true, match });
 });
 
@@ -834,116 +952,58 @@ app.post('/api/chess/match/:id/surrender', (req, res) => {
 });
 
 // ============================================================
-// ЛИДЕРБОРД (Upstash Redis с fallback в память)
+// ФОНОВАЯ ОЧИСТКА МАТЧЕЙ
 // ============================================================
-const UPSTASH_URL = process.env.UPSTASH_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
+setInterval(() => {
+    const now = nowMs();
 
-async function redis(...args) {
-    if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
-    try {
-        const res = await fetch(UPSTASH_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${UPSTASH_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(args)
-        });
-        if (!res.ok) { console.error('Redis HTTP', res.status); return null; }
-        const data = await res.json();
-        return data.result;
-    } catch (e) {
-        console.error('Redis error:', e.message);
-        return null;
-    }
-}
-
-const lowerIsBetterGame = (gameId) => gameId.startsWith('mines');
-
-async function saveScore(gameId, nickname, score, lowerIsBetter, losses) {
-    if (!UPSTASH_URL) {
-        // Fallback в память (не переживёт рестарт)
-        if (!leaderboards[gameId]) leaderboards[gameId] = [];
-        let existing = leaderboards[gameId].find(x => x.nickname === nickname);
-        if (existing) {
-            if (lowerIsBetter ? score < existing.score : score > existing.score) existing.score = score;
-            existing.losses = Math.max(existing.losses || 0, losses);
-            existing.date = Date.now();
-        } else {
-            leaderboards[gameId].push({ nickname, score, losses, date: Date.now(), id: crypto.randomUUID() });
-        }
-        leaderboards[gameId].sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
-        leaderboards[gameId] = leaderboards[gameId].slice(0, 10);
-        return;
-    }
-
-    const key = `lb:${gameId}`;
-    const raw = await redis('HGET', key, nickname);
-    let existing = null;
-    if (raw) { try { existing = JSON.parse(raw); } catch (_) {} }
-
-    let newScore = score;
-    let newLosses = Math.max(existing?.losses || 0, losses);
-    let shouldWrite = true;
-
-    if (existing) {
-        if (lowerIsBetter) {
-            if (score >= existing.score) { newScore = existing.score; shouldWrite = false; }
-        } else {
-            if (score <= existing.score) { newScore = existing.score; shouldWrite = false; }
-        }
-        if (newLosses !== existing.losses) shouldWrite = true;
-    }
-
-    if (shouldWrite) {
-        const entry = JSON.stringify({ score: newScore, losses: newLosses, date: Date.now() });
-        await redis('HSET', key, nickname, entry);
-    }
-}
-
-async function readScores(gameId) {
-    if (!UPSTASH_URL) {
-        return (leaderboards[gameId] || []).slice(0, 10);
-    }
-
-    const key = `lb:${gameId}`;
-    const all = await redis('HGETALL', key);
-    const scores = [];
-
-    if (Array.isArray(all)) {
-        for (let i = 0; i < all.length; i += 2) {
-            const nickname = all[i];
-            try {
-                const v = JSON.parse(all[i + 1]);
-                scores.push({ nickname, score: v.score, losses: v.losses || 0, date: v.date || 0 });
-            } catch (_) {}
+    for (const id of Object.keys(matches)) {
+        const m = matches[id];
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete matches[id]; continue; }
+        if (m.status === 'playing') {
+            const seenA = m.lastSeen[m.players[0].id] || 0;
+            const seenB = m.lastSeen[m.players[1].id] || 0;
+            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete matches[id];
         }
     }
+    for (let i = matchmakingQueue.length - 1; i >= 0; i--) {
+        if (now - matchmakingQueue[i].timestamp > MATCHMAKING_TIMEOUT) matchmakingQueue.splice(i, 1);
+    }
 
-    const lowerIsBetter = lowerIsBetterGame(gameId);
-    scores.sort((a, b) => lowerIsBetter ? a.score - b.score : b.score - a.score);
-    return scores.slice(0, 10);
-}
+    for (const id of Object.keys(chessMatches)) {
+        const m = chessMatches[id];
+        if (m.status === 'finished' && m.finishedAt && now - m.finishedAt > FINISHED_MATCH_TTL) { delete chessMatches[id]; continue; }
+        if (m.status === 'playing') {
+            const seenA = m.lastSeen[m.players[0].id] || 0;
+            const seenB = m.lastSeen[m.players[1].id] || 0;
+            if (Math.max(now - seenA, now - seenB) > ABANDONED_MATCH_TTL) delete chessMatches[id];
+        }
+    }
+    for (let i = chessQueue.length - 1; i >= 0; i--) {
+        if (now - chessQueue[i].timestamp > MATCHMAKING_TIMEOUT) chessQueue.splice(i, 1);
+    }
 
-app.post('/api/scores', async (req, res) => {
-    const { gameId, nickname, score, lowerIsBetter, losses = 0 } = req.body;
-    if (!gameId || score == null) return res.status(400).json({ success: false, error: 'Нет данных' });
-    if (typeof score !== 'number' || score < 0 || score > 999999) return res.status(400).json({ success: false, error: 'Неверный счет' });
-    if (typeof nickname !== 'string' || nickname.length > 24) return res.status(400).json({ success: false, error: 'Ник слишком длинный' });
-
-    await saveScore(gameId, nickname, score, !!lowerIsBetter, losses);
-    res.json({ success: true });
-});
-
-app.get('/api/scores/:gameId', async (req, res) => {
-    const scores = await readScores(req.params.gameId);
-    res.json({ success: true, scores });
-});
+    for (const id of Object.keys(pongRooms)) {
+        const r = pongRooms[id];
+        if (r.state === 'finished') {
+            if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
+            continue;
+        }
+        if (r.players.length === 2) {
+            const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
+            const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
+            const bothStale = (now - seenA > DISCONNECT_TIMEOUT) && (now - seenB > DISCONNECT_TIMEOUT);
+            if (bothStale) delete pongRooms[id];
+        }
+    }
+    for (let i = pongQueue.length - 1; i >= 0; i--) {
+        if (now - pongQueue[i].timestamp > MATCHMAKING_TIMEOUT) pongQueue.splice(i, 1);
+    }
+}, 30 * 1000);
 
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
-// ============================================================
-// ЗАПУСК СЕРВЕРА
-// ============================================================
-app.listen(PORT, () => console.log(`Слушаем порт ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Слушаем порт ${PORT}`);
+    loadLeaderboardsFromDB();
+});
