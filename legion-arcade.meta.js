@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Legion: Arcade (мини-игры + Мультиплеер)
 // @namespace    https://github.com/
-// @version      0.5.0
+// @version      0.5.1
 // @description  Мини-игры в стиле Легиона: от сапёра до онлайн-шашек.
 // @match        https://play.multidonate.ru/c/*
 // @noframes
