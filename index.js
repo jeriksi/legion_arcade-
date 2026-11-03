@@ -25,6 +25,10 @@ const REPEAT_LIMIT = 3;
 
 // Pong — 1:1 с офлайн-версией в userscript
 const PONG_W = 400, PONG_H = 300, PONG_PW = 8, PONG_PH = 60, PONG_BS = 10, PONG_WIN = 7;
+const PONG_START_COUNTDOWN = 3000;   // стартовый отсчёт
+const PONG_GOAL_COUNTDOWN = 800;     // пауза после гола
+const PONG_MAX_STEP_MS = 16.66;      // 1 субстеп = 1 кадр
+const PONG_MAX_SUBSTEPS = 60;        // max 1 сек симуляции за один poll
 
 // ============================================================
 // ХРАНИЛИЩА
@@ -70,15 +74,22 @@ function checkChessDraw(match) {
     return null;
 }
 
+// Сброс мяча в центр с нулевой скоростью (аналог offline startRound)
 function resetBall(room) {
-    const dirX = Math.random() > 0.5 ? 1 : -1;
-    const dirY = Math.random() > 0.5 ? 1 : -1;
     room.ball = {
         x: PONG_W / 2 - PONG_BS / 2,
         y: PONG_H / 2 - PONG_BS / 2,
-        vx: 4 * dirX,
-        vy: 4 * dirY * (Math.random() * 0.5 + 0.5)
+        vx: 0,
+        vy: 0
     };
+}
+
+// Случайная начальная скорость (аналог offline после отсчёта)
+function randomizePongVelocity(room) {
+    const dirX = Math.random() > 0.5 ? 1 : -1;
+    const dirY = Math.random() > 0.5 ? 1 : -1;
+    room.ball.vx = 4 * dirX;
+    room.ball.vy = 4 * dirY * (Math.random() * 0.5 + 0.5);
 }
 
 // ============================================================
@@ -336,9 +347,12 @@ app.post('/api/pong/find-match', (req, res) => {
                 { id: opponent.id, nickname: opponent.nickname, paddleY: PONG_H / 2, index: 0 },
                 { id: playerId, nickname: nickname || 'Игрок', paddleY: PONG_H / 2, index: 1 }
             ],
-            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 4, vy: 2 },
+            ball: { x: PONG_W / 2 - PONG_BS / 2, y: PONG_H / 2 - PONG_BS / 2, vx: 0, vy: 0 },
             score: { p1: 0, p2: 0 },
-            state: 'playing',
+            state: 'countdown',
+            countdownEnd: ts + PONG_START_COUNTDOWN,
+            countdownIsInitial: true,
+            winner: null,
             lastTick: ts,
             lastSeen: { [opponent.id]: ts, [playerId]: ts },
             finishedAt: null
@@ -381,44 +395,91 @@ app.get('/api/pong/room/:roomId', (req, res) => {
     const me = playerId ? room.players.find(p => p.id === playerId) : null;
     const playerIndex = me ? room.players.indexOf(me) : -1;
 
+    let now = nowMs();
+
+    // 1) Countdown → playing
+    if (room.state === 'countdown' && now >= room.countdownEnd) {
+        room.state = 'playing';
+        room.countdownIsInitial = false;
+        randomizePongVelocity(room);
+        room.lastTick = room.countdownEnd; // начинаем физику «с момента конца отсчёта»
+    }
+
+    // 2) Отключение соперника (и в игре, и в отсчёте)
+    if ((room.state === 'playing' || room.state === 'countdown') && playerId) {
+        const opp = room.players.find(p => p.id !== playerId);
+        if (opp && room.lastSeen[opp.id] && now - room.lastSeen[opp.id] > DISCONNECT_TIMEOUT) {
+            room.state = 'finished';
+            room.winner = playerIndex;
+            room.finishedAt = now;
+        }
+    }
+
+    // 3) Физика (с субстепами — лечит «туннелирование» и «кривые хитбоксы»)
     if (room.state === 'playing') {
-        const now = nowMs();
-        const dtFrames = Math.min((now - room.lastTick) / 16.66, 20);
+        const realDt = Math.min(now - room.lastTick, 1000); // не более 1 сек симуляции
         room.lastTick = now;
 
-        room.ball.x += room.ball.vx * dtFrames;
-        room.ball.y += room.ball.vy * dtFrames;
+        const substeps = Math.min(PONG_MAX_SUBSTEPS, Math.max(1, Math.ceil(realDt / PONG_MAX_STEP_MS)));
+        const dtPerStep = realDt / substeps;
 
-        if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
-        else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
+        for (let s = 0; s < substeps; s++) {
+            const dt = dtPerStep / 16.66;
 
-        const p1 = room.players[0], p2 = room.players[1];
-        const p1Top = p1.paddleY - PONG_PH / 2;
-        const p2Top = p2.paddleY - PONG_PH / 2;
+            room.ball.x += room.ball.vx * dt;
+            room.ball.y += room.ball.vy * dt;
 
-        if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
-            if (room.ball.y + PONG_BS >= p1Top && room.ball.y <= p1Top + PONG_PH) {
-                room.ball.x = PONG_PW;
-                room.ball.vx *= -1.1;
-                room.ball.vy = ((room.ball.y + PONG_BS / 2 - p1.paddleY) / PONG_PH) * 10;
+            // Стены
+            if (room.ball.y <= 0) { room.ball.y = 0; room.ball.vy *= -1; }
+            else if (room.ball.y + PONG_BS >= PONG_H) { room.ball.y = PONG_H - PONG_BS; room.ball.vy *= -1; }
+
+            // Левая ракетка (paddleY = центр, p1Top = верх)
+            const p1Top = room.players[0].paddleY - PONG_PH / 2;
+            if (room.ball.vx < 0 && room.ball.x <= PONG_PW && room.ball.x + PONG_BS >= 0) {
+                if (room.ball.y + PONG_BS >= p1Top && room.ball.y <= p1Top + PONG_PH) {
+                    room.ball.x = PONG_PW;
+                    room.ball.vx *= -1.1;
+                    room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[0].paddleY) / PONG_PH) * 10;
+                }
+            }
+            // Правая ракетка
+            const p2Top = room.players[1].paddleY - PONG_PH / 2;
+            if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
+                if (room.ball.y + PONG_BS >= p2Top && room.ball.y <= p2Top + PONG_PH) {
+                    room.ball.x = PONG_W - PONG_PW - PONG_BS;
+                    room.ball.vx *= -1.1;
+                    room.ball.vy = ((room.ball.y + PONG_BS / 2 - room.players[1].paddleY) / PONG_PH) * 10;
+                }
+            }
+
+            // Ограничение скорости
+            room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
+            room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
+
+            // Гол
+            if (room.ball.x < 0) {
+                room.score.p2++;
+                resetBall(room);
+                room.state = 'countdown';
+                room.countdownEnd = nowMs() + PONG_GOAL_COUNTDOWN;
+                room.countdownIsInitial = false;
+                room.lastTick = nowMs();
+                break;
+            } else if (room.ball.x > PONG_W) {
+                room.score.p1++;
+                resetBall(room);
+                room.state = 'countdown';
+                room.countdownEnd = nowMs() + PONG_GOAL_COUNTDOWN;
+                room.countdownIsInitial = false;
+                room.lastTick = nowMs();
+                break;
             }
         }
-        if (room.ball.vx > 0 && room.ball.x + PONG_BS >= PONG_W - PONG_PW) {
-            if (room.ball.y + PONG_BS >= p2Top && room.ball.y <= p2Top + PONG_PH) {
-                room.ball.x = PONG_W - PONG_PW - PONG_BS;
-                room.ball.vx *= -1.1;
-                room.ball.vy = ((room.ball.y + PONG_BS / 2 - p2.paddleY) / PONG_PH) * 10;
-            }
-        }
 
-        room.ball.vx = Math.max(-15, Math.min(15, room.ball.vx));
-        room.ball.vy = Math.max(-12, Math.min(12, room.ball.vy));
-
-        if (room.ball.x < 0) { room.score.p2++; resetBall(room); room.lastTick = nowMs(); }
-        else if (room.ball.x > PONG_W) { room.score.p1++; resetBall(room); room.lastTick = nowMs(); }
-
+        // Победа
         if (room.score.p1 >= PONG_WIN || room.score.p2 >= PONG_WIN) {
             room.state = 'finished';
+            room.winner = room.score.p1 >= PONG_WIN ? 0 : 1;
             room.finishedAt = nowMs();
         }
     }
@@ -432,7 +493,10 @@ app.get('/api/pong/room/:roomId', (req, res) => {
             p1Y: room.players[0].paddleY,
             p2Y: room.players[1].paddleY,
             state: room.state,
-            timestamp: nowMs()
+            winner: room.winner !== undefined ? room.winner : null,
+            countdownRemaining: room.state === 'countdown' ? Math.max(0, room.countdownEnd - now) : 0,
+            countdownIsInitial: room.state === 'countdown' ? room.countdownIsInitial : false,
+            timestamp: now
         }
     });
 });
@@ -451,7 +515,11 @@ app.post('/api/pong/room/:roomId/move', (req, res) => {
 
 app.post('/api/pong/room/:roomId/leave', (req, res) => {
     const room = pongRooms[req.params.roomId];
-    if (room && room.state === 'playing') {
+    if (!room) return res.json({ success: true });
+    if (room.state !== 'finished') {
+        const { playerId } = req.body || {};
+        const idx = room.players.findIndex(p => p.id === playerId);
+        room.winner = idx === 0 ? 1 : idx === 1 ? 0 : null;
         room.state = 'finished';
         room.finishedAt = nowMs();
     }
@@ -503,7 +571,8 @@ setInterval(() => {
             if (r.finishedAt && now - r.finishedAt > FINISHED_MATCH_TTL) delete pongRooms[id];
             continue;
         }
-        if (r.state === 'playing' && r.players.length === 2) {
+        // playing или countdown — брошенная комната, если оба молчат
+        if (r.players.length === 2) {
             const seenA = (r.lastSeen && r.lastSeen[r.players[0].id]) || 0;
             const seenB = (r.lastSeen && r.lastSeen[r.players[1].id]) || 0;
             const bothStale = (now - seenA > DISCONNECT_TIMEOUT) && (now - seenB > DISCONNECT_TIMEOUT);
