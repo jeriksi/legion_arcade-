@@ -1716,6 +1716,490 @@
         }
     };
 
+// ============================================================
+// ИГРА: МОЛОЧНАЯ ФЕРМА (кликер)
+// ============================================================
+function cowFmtNum(n) {
+    if (!n || n < 1000) return Math.floor(n || 0).toString();
+    const suffixes = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'];
+    let tier = Math.floor(Math.log10(n) / 3);
+    if (tier >= suffixes.length) tier = suffixes.length - 1;
+    const scaled = n / Math.pow(10, tier * 3);
+    return scaled.toFixed(scaled < 100 ? 2 : 1) + suffixes[tier];
+}
+
+const CowClicker = {
+    id: 'cowclicker',
+    name: 'Молочная ферма',
+    icon: '🐄',
+    ring: '#e8b05c',
+    category: 'solo',
+    subtitle() {
+        const s = store.get('cow.state', null);
+        if (!s) return 'кликер · коровы ждут';
+        const p = s.prestigeLevel || 0;
+        return cowFmtNum(s.totalMilk || 0) + ' 🥛' + (p > 0 ? ' · ⭐' + p : '');
+    },
+    mount(root, api) {
+        let state = {
+            milk: 0, totalMilk: 0, clickUps: {}, buildings: {}, multipliers: {},
+            prestigeLevel: 0
+        };
+
+        let pendingClicks = 0;
+        let clickTimeout = null;
+        let isSyncing = false;
+        let buyMode = store.get('cow.buyMode', 1); // 1, 10, 100, 'max'
+
+        const CSS = `
+        .cow-game { display: flex; flex-direction: column; gap: 10px; padding: 10px; color: #f0e6d2; font-family: var(--font); max-width: 100%; position: relative; }
+        .cow-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: rgba(0,0,0,0.35); border-radius: 12px; border: 1px solid rgba(243,201,105,0.25); }
+        .cow-milk-count { font-size: 24px; font-weight: 800; color: #f3c969; line-height: 1.1; }
+        .cow-mps { font-size: 12px; color: #b8a082; font-weight: 700; margin-top: 2px; }
+        .cow-stage { position: relative; display: flex; justify-content: center; align-items: center; min-height: 220px; padding: 10px; background: radial-gradient(ellipse at center, rgba(243,201,105,0.12) 0%, transparent 65%); border-radius: 12px; overflow: hidden; }
+        .cow-btn { background: none; border: none; font-size: 110px; line-height: 1; cursor: pointer; user-select: none; padding: 8px 16px; transition: transform 0.08s; filter: drop-shadow(0 6px 14px rgba(0,0,0,0.55)); }
+        .cow-btn:active { transform: scale(0.94); }
+        .cow-btn.clicked { animation: cow-pop 0.18s ease-out; }
+        @keyframes cow-pop { 0%{transform:scale(1)} 40%{transform:scale(1.12)} 100%{transform:scale(1)} }
+        .cow-float { position: absolute; pointer-events: none; font-weight: 900; font-size: 20px; color: #f3c969; text-shadow: 0 2px 6px rgba(0,0,0,0.9); animation: cow-float-up 1s ease-out forwards; z-index: 5; }
+        @keyframes cow-float-up { 0%{opacity:1;transform:translate(-50%,-50%)} 100%{opacity:0;transform:translate(-50%,-150%)} }
+        .cow-tabs { display: flex; gap: 4px; padding: 4px; background: rgba(0,0,0,0.35); border-radius: 10px; flex-wrap: wrap; }
+        .cow-tab { flex: 1; min-width: 60px; padding: 8px 6px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: #b8a082; font-weight: 700; font-size: 12px; cursor: pointer; font-family: inherit; }
+        .cow-tab:hover { color: #f3c969; }
+        .cow-tab.on { background: rgba(243,201,105,0.18); color: #f3c969; border-color: rgba(243,201,105,0.45); }
+        .cow-content { max-height: 300px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; scrollbar-color: #5a4a2f transparent; }
+        .cow-content::-webkit-scrollbar { width: 6px; }
+        .cow-content::-webkit-scrollbar-thumb { background: #5a4a2f; border-radius: 4px; }
+        .cow-buy-mode { display: flex; gap: 4px; margin-bottom: 8px; position: sticky; top: 0; background: #1b1c23; padding: 4px 0; z-index: 2; }
+        .cow-buy-mode .cow-tab { padding: 4px 10px; font-size: 11px; flex: 0 0 auto; }
+        .cow-up { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(243,201,105,0.16); border-radius: 10px; cursor: pointer; transition: background 0.12s, border-color 0.12s, opacity 0.2s; width: 100%; text-align: left; font-family: inherit; color: inherit; }
+        .cow-up:hover:not(.locked):not(.owned) { background: rgba(243,201,105,0.1); border-color: rgba(243,201,105,0.45); }
+        .cow-up.locked { opacity: 0.42; }
+        .cow-up.owned { opacity: 0.6; cursor: default; }
+        .cow-up-icon { font-size: 26px; width: 38px; text-align: center; flex: none; }
+        .cow-up-info { flex: 1; min-width: 0; }
+        .cow-up-name { font-weight: 800; font-size: 14px; color: #f0e6d2; }
+        .cow-up-desc { font-size: 11px; color: #a89070; margin-top: 2px; }
+        .cow-up-right { text-align: right; flex: none; }
+        .cow-up-price { font-weight: 800; color: #f3c969; font-size: 14px; white-space: nowrap; }
+        .cow-up.locked .cow-up-price { color: #8a7a5a; }
+        .cow-up-count { font-size: 11px; color: #a89070; margin-top: 2px; }
+        .cow-toast-container { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: none; z-index: 100; }
+        .cow-toast { background: rgba(89,217,142,0.9); color: #0f1a13; padding: 8px 16px; border-radius: 20px; font-weight: 800; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.5); animation: cow-toast-in 0.3s ease-out; white-space: nowrap; }
+        @keyframes cow-toast-in { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+        .cow-prestige-box { padding: 18px 16px; text-align: center; background: rgba(243,201,105,0.08); border: 1px solid rgba(243,201,105,0.3); border-radius: 12px; }
+        .cow-ach { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 6px; background: rgba(255,255,255,0.03); border: 1px solid rgba(243,201,105,0.16); border-radius: 10px; }
+        .cow-ach.locked { opacity: 0.4; }
+        .cow-ach.unlocked { border-color: rgba(89,217,142,0.5); background: rgba(89,217,142,0.08); }
+        .cow-ach-icon { font-size: 22px; }
+        .cow-ach-info { flex: 1; }
+        .cow-ach-name { font-weight: 800; font-size: 13px; }
+        .cow-ach-thr { font-size: 11px; color: #a89070; }
+        .cow-ach-bonus { color: #59d98e; font-weight: 800; font-size: 13px; }
+        `;
+        root.append(h('style', { text: CSS }));
+
+        const wrap = h('div', { class: 'cow-game' });
+        root.append(wrap);
+        const toastContainer = h('div', { class: 'cow-toast-container' });
+        wrap.append(toastContainer);
+
+        // ============================ HEADER ============================
+        const milkCountEl = h('div', { class: 'cow-milk-count', text: '0' });
+        const mpsEl = h('div', { class: 'cow-mps', text: '0 / сек' });
+        const clickPowerEl = h('div', { class: 'cow-mps', text: '+0 / клик' });
+        wrap.append(h('div', { class: 'cow-header' },
+            h('div', {}, milkCountEl, h('div', { style: 'font-size: 10px; color: #7a6a4a; font-weight: 800; text-transform: uppercase; margin-top: 3px;' }, 'молоко')),
+            h('div', { style: 'text-align: right;' }, mpsEl, clickPowerEl)
+        ));
+
+        // ============================ STAGE ============================
+        const stageEl = h('div', { class: 'cow-stage' });
+        const cowBtn = h('button', { class: 'cow-btn', text: '🐄', onclick: onCowClick });
+        stageEl.append(cowBtn);
+        wrap.append(stageEl);
+
+        // ============================ TABS ============================
+        const tabs = [
+            { id: 'clickups',     label: '💪 Клик' },
+            { id: 'buildings',    label: '🏠 Здания' },
+            { id: 'mults',        label: '🌟 Бонусы' },
+            { id: 'achievements', label: '🏆 Достижения' },
+            { id: 'prestige',     label: '⭐ Престиж' },
+        ];
+        let currentTab = 'clickups';
+        const tabsEl = h('div', { class: 'cow-tabs' });
+        const tabBtns = {};
+        for (const t of tabs) {
+            const btn = h('button', { class: 'cow-tab' + (t.id === currentTab ? ' on' : ''), text: t.label, onclick: () => { currentTab = t.id; renderTabs(); } });
+            tabBtns[t.id] = btn;
+            tabsEl.append(btn);
+        }
+        wrap.append(tabsEl);
+        const contentEl = h('div', { class: 'cow-content' });
+        wrap.append(contentEl);
+
+        let currentCards = [];
+
+        // ============================ КЛИКИ ============================
+        function onCowClick(e) {
+            const p = getLocalClickPower();
+            state.milk += p;
+            state.totalMilk += p;
+
+            cowBtn.classList.remove('clicked');
+            void cowBtn.offsetWidth;
+            cowBtn.classList.add('clicked');
+            spawnFloat('+' + cowFmtNum(p), e, '#f3c969', 20);
+            updateHeader();
+
+            pendingClicks++;
+            if (!clickTimeout) {
+                clickTimeout = setTimeout(sendClicks, 1000);
+            }
+        }
+
+        async function sendClicks() {
+            clickTimeout = null;
+            if (pendingClicks === 0 || isSyncing) return;
+            const toSend = pendingClicks;
+            pendingClicks = 0;
+
+            isSyncing = true;
+            const res = await serverRequest('/api/cow/click', {
+                method: 'POST', body: JSON.stringify({ clicks: toSend })
+            });
+            isSyncing = false;
+
+            if (res && res.success) {
+                state.milk = res.milk;
+                state.totalMilk = res.totalMilk;
+                updateHeader();
+                refreshVisibleCards();
+            } else {
+                syncState();
+            }
+        }
+
+        // ============================ ПОКУПКИ ============================
+        async function buyUpgrade(type, id, qty) {
+            const res = await serverRequest('/api/cow/buy', {
+                method: 'POST', body: JSON.stringify({ type, id, qty })
+            });
+            if (res && res.success) {
+                state.milk = res.milk;
+                syncState();
+            } else {
+                showToast(res.error || 'Ошибка покупки');
+            }
+        }
+
+        async function doPrestige() {
+            if (!confirm('Вы уверены? Весь прогресс (кроме общего молока и достижений) сбросится.')) return;
+            const res = await serverRequest('/api/cow/prestige', { method: 'POST', body: '{}' });
+            if (res && res.success) {
+                state = res.state;
+                renderAll();
+                showToast('⭐ Престиж успешно применён!');
+            }
+        }
+
+        async function syncState() {
+            const res = await serverRequest('/api/cow/sync', {
+                method: 'POST',
+                body: JSON.stringify({ nickname: getPlayerName() }) // <--- Передаем ник
+            });
+            if (res && res.success) {
+                state = res.state;
+                updateHeader();
+                refreshVisibleCards();
+                store.set('cow.state', { totalMilk: state.totalMilk, prestigeLevel: state.prestigeLevel });
+                api.refreshCards();
+            }
+        }
+
+        // ============================ КОНФИГИ ============================
+        const CLICK_UPS_CFG = [
+            { id: 'hands',   icon: '💪', name: 'Мозолистые руки',   cost: 15,     effect: 1,      mult: 1.15, desc: '+1 молока за клик' },
+            { id: 'bicep',   icon: '🦾', name: 'Молочный бицепс',    cost: 500,    effect: 10,     mult: 1.20, desc: '+10 молока за клик' },
+            { id: 'steel',   icon: '✋', name: 'Стальные ладони',    cost: 5e4,    effect: 100,    mult: 1.25, desc: '+100 молока за клик' },
+            { id: 'diamond', icon: '💎', name: 'Алмазный хват',      cost: 5e6,    effect: 1000,   mult: 1.30, desc: '+1 000 молока за клик' },
+            { id: 'plasma',  icon: '⚡', name: 'Плазменные пальцы',  cost: 5e8,    effect: 1e4,    mult: 1.35, desc: '+10 000 молока за клик' },
+            { id: 'cosmic',  icon: '🌌', name: 'Космическая хватка', cost: 5e10,   effect: 1e5,    mult: 1.40, desc: '+100 000 молока за клик' },
+            { id: 'divine',  icon: '🙏', name: 'Божественное доение',cost: 5e12,   effect: 1e6,    mult: 1.50, desc: '+1 000 000 молока за клик' },
+        ];
+        const BUILDINGS_CFG = [
+            { id: 'cat',      icon: '🐱', name: 'Кот-помощник',         cost: 15,     prod: 0.15,  mult: 1.15 },
+            { id: 'maid',     icon: '👩‍🌾', name: 'Доярка-стажёрка',      cost: 100,    prod: 1,     mult: 1.15 },
+            { id: 'auto',     icon: '🤖', name: 'Автодойка',             cost: 1100,   prod: 8,     mult: 1.15 },
+            { id: 'plant',    icon: '🏭', name: 'Молочный цех',          cost: 12000,  prod: 47,    mult: 1.15 },
+            { id: 'cheese',   icon: '🧀', name: 'Сыроварня',             cost: 130000, prod: 260,   mult: 1.15 },
+            { id: 'bank',     icon: '🏦', name: 'Молочный банк',         cost: 1.4e6,  prod: 1400,  mult: 1.15 },
+            { id: 'cosmo',    icon: '🚀', name: 'Космо-корова',          cost: 2e7,    prod: 7800,  mult: 1.15 },
+            { id: 'quantum',  icon: '⚛️', name: 'Квантовая ферма',       cost: 3.3e8,  prod: 4.4e4, mult: 1.15 },
+            { id: 'portal',   icon: '🌀', name: 'Молочный портал',       cost: 5.1e9,  prod: 2.6e5, mult: 1.15 },
+            { id: 'alchemy',  icon: '⚗️', name: 'Алхимическая лаборатория', cost: 7.5e10, prod: 1.6e6, mult: 1.15 },
+            { id: 'time',     icon: '⏳', name: 'Машина времени',        cost: 1e12,   prod: 1e7,   mult: 1.15 },
+            { id: 'infinity', icon: '♾️', name: 'Бесконечная корова',    cost: 1.4e13, prod: 6.5e7, mult: 1.15 },
+        ];
+        const MULTS_CFG = [
+            { id: 'hay',    icon: '🌾', name: 'Премиум-сено',     cost: 1e4,  factor: 2 },
+            { id: 'gmo',    icon: '🧬', name: 'ГМО-кукуруза',     cost: 1e5,  factor: 2 },
+            { id: 'wonder', icon: '🌟', name: 'Чудо-корм',        cost: 1e6,  factor: 3 },
+            { id: 'nano',   icon: '🔬', name: 'Нано-удобрение',   cost: 1e7,  factor: 3 },
+            { id: 'legend', icon: '✨', name: 'Легендарное сено', cost: 1e8,  factor: 5 },
+            { id: 'meta',   icon: '💫', name: 'Мета-корм',        cost: 1e10, factor: 5 },
+            { id: 'void',   icon: '🌑', name: 'Корм из пустоты',  cost: 1e12, factor: 10 },
+        ];
+        const ACH_CFG = [
+            { threshold: 1e3,  bonus: 0.01, name: 'Первая тысяча',    icon: '🐄' }, { threshold: 1e4,  bonus: 0.01, name: 'Уже неплохо',      icon: '🐄' },
+            { threshold: 1e5,  bonus: 0.01, name: 'Молочный магнат',  icon: '🐄' }, { threshold: 1e6,  bonus: 0.02, name: 'Миллионер',        icon: '💧' },
+            { threshold: 1e7,  bonus: 0.02, name: 'Большой бизнес',   icon: '💧' }, { threshold: 1e8,  bonus: 0.02, name: 'Молочный лорд',    icon: '💧' },
+            { threshold: 1e9,  bonus: 0.03, name: 'Миллиардер',       icon: '🌊' }, { threshold: 1e10, bonus: 0.03, name: 'Империя',          icon: '🌊' },
+            { threshold: 1e11, bonus: 0.03, name: 'Молочный хан',     icon: '🌊' }, { threshold: 1e12, bonus: 0.05, name: 'Триллионер',       icon: '🌌' },
+            { threshold: 1e13, bonus: 0.05, name: 'Молочный бог',     icon: '🌌' }, { threshold: 1e14, bonus: 0.05, name: 'Абсолют',          icon: '🌌' },
+            { threshold: 1e15, bonus: 0.10, name: 'Молочный титан',   icon: '👑' }, { threshold: 1e16, bonus: 0.10, name: 'За гранью',        icon: '👑' },
+        ];
+
+        // ============================ РАСЧЁТЫ (UI) ============================
+        function getLocalClickPower() {
+            let ach = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) ach += a.bonus;
+            let g = 1; for (const m of MULTS_CFG) if (state.multipliers[m.id]) g *= m.factor;
+            g *= Math.pow(1.5, state.prestigeLevel); g *= (1 + ach);
+            let cp = 1; for (const u of CLICK_UPS_CFG) cp += (state.clickUps[u.id] || 0) * u.effect;
+            return cp * g;
+        }
+        function getLocalMps() {
+            let ach = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) ach += a.bonus;
+            let g = 1; for (const m of MULTS_CFG) if (state.multipliers[m.id]) g *= m.factor;
+            g *= Math.pow(1.5, state.prestigeLevel); g *= (1 + ach);
+            let mps = 0; for (const b of BUILDINGS_CFG) {
+                const o = state.buildings[b.id] || 0;
+                let mm = 1; for (const t of [25, 50, 100, 200, 300, 400, 500]) if (o >= t) mm *= 2;
+                mps += o * b.prod * mm;
+            }
+            return mps * g;
+        }
+
+        function getBuyInfo(type, id, mode) {
+            if (type === 'mult') return { qty: 1, price: MULTS_CFG.find(m=>m.id===id).cost };
+            const cfg = type === 'building' ? BUILDINGS_CFG.find(b=>b.id===id) : CLICK_UPS_CFG.find(u=>u.id===id);
+            const owned = type === 'building' ? (state.buildings[id] || 0) : (state.clickUps[id] || 0);
+
+            if (mode === 'max') {
+                let total = 0, count = 0;
+                let p = Math.floor(cfg.cost * Math.pow(cfg.mult, owned));
+                while (total + p <= state.milk && count < 10000) {
+                    total += p; count++;
+                    p = Math.floor(cfg.cost * Math.pow(cfg.mult, owned + count));
+                }
+                // Если не хватает даже на 1, возвращаем цену за 1, чтобы кнопка отображалась корректно
+                if (count === 0) {
+                    return { qty: 1, price: Math.floor(cfg.cost * Math.pow(cfg.mult, owned)) };
+                }
+                return { qty: count, price: total };
+            } else {
+                let total = 0;
+                for (let i = 0; i < mode; i++) total += Math.floor(cfg.cost * Math.pow(cfg.mult, owned + i));
+                return { qty: mode, price: total };
+            }
+        }
+
+        // ============================ UI ============================
+        let lastHeaderUpdate = 0;
+        function updateHeader() {
+            const now = Date.now();
+            if (now - lastHeaderUpdate < 100) return;
+            lastHeaderUpdate = now;
+            milkCountEl.textContent = cowFmtNum(state.milk);
+            mpsEl.textContent = cowFmtNum(getLocalMps()) + ' / сек';
+            clickPowerEl.textContent = '+' + cowFmtNum(getLocalClickPower()) + ' / клик';
+        }
+
+        function makeBuyCard(cfg, type) {
+            const card = h('button', { class: 'cow-up' });
+            const priceEl = h('div', { class: 'cow-up-price' });
+            const descEl = h('div', { class: 'cow-up-desc' });
+            const countEl = h('div', { class: 'cow-up-count' });
+            card.append(
+                h('div', { class: 'cow-up-icon', text: cfg.icon }),
+                h('div', { class: 'cow-up-info' }, h('div', { class: 'cow-up-name', text: cfg.name }), descEl),
+                h('div', { class: 'cow-up-right' }, priceEl, countEl)
+            );
+
+            card.refresh = () => {
+                const owned = type === 'building' ? (state.buildings[cfg.id] || 0) : (type === 'clickUp' ? (state.clickUps[cfg.id] || 0) : !!state.multipliers[cfg.id]);
+                let desc = cfg.desc || '';
+                let price = cfg.cost;
+
+                if (type !== 'mult') {
+                    const info = getBuyInfo(type, cfg.id, buyMode);
+                    price = info.price;
+
+                    if (type === 'building') {
+                        let mm = 1; for (const t of [25, 50, 100, 200, 300, 400, 500]) if (owned >= t) mm *= 2;
+                        desc = '+' + cowFmtNum(cfg.prod * mm) + ' / сек' + (mm > 1 ? ' · вехи ×' + mm : '');
+                    } else if (type === 'clickUp') {
+                        desc = cfg.desc;
+                    }
+                }
+
+                descEl.textContent = desc;
+                if (owned === true) {
+                    priceEl.textContent = '✓ куплено'; countEl.textContent = '';
+                    card.classList.add('owned'); card.classList.remove('locked');
+                } else {
+                    priceEl.textContent = cowFmtNum(price) + ' 🥛';
+                    let countText = '×' + owned;
+                    if (buyMode === 'max' && type !== 'mult') countText += ' (+' + getBuyInfo(type, cfg.id, buyMode).qty + ')';
+                    else if (buyMode > 1 && type !== 'mult') countText += ' (+' + buyMode + ')';
+                    countEl.textContent = countText;
+
+                    card.classList.remove('owned');
+                    card.classList.toggle('locked', state.milk < price);
+                }
+            };
+
+            card.onclick = () => {
+                const owned = type === 'building' ? (state.buildings[cfg.id] || 0) : (type === 'clickUp' ? (state.clickUps[cfg.id] || 0) : !!state.multipliers[cfg.id]);
+                if (owned === true) return;
+                const info = getBuyInfo(type, cfg.id, buyMode);
+                if (state.milk < info.price) return;
+                buyUpgrade(type, cfg.id, info.qty);
+            };
+            card.refresh();
+            return card;
+        }
+
+        function refreshVisibleCards() { for (const c of currentCards) if (c.refresh) c.refresh(); }
+
+        function makeBuyModeRow() {
+            const row = h('div', { class: 'cow-buy-mode' });
+            const modes = [1, 10, 100, 'max'];
+            for (const n of modes) {
+                const label = n === 'max' ? 'MAX' : '×' + n;
+                row.append(h('button', {
+                    class: 'cow-tab' + (buyMode === n ? ' on' : ''),
+                    text: label,
+                    onclick: () => { buyMode = n; store.set('cow.buyMode', n); renderTabs(); }
+                }));
+            }
+            return row;
+        }
+
+        function renderTabs() {
+            for (const t of tabs) tabBtns[t.id].classList.toggle('on', t.id === currentTab);
+            contentEl.innerHTML = ''; currentCards = [];
+
+            if (currentTab === 'clickups') {
+                contentEl.append(makeBuyModeRow());
+                for (const u of CLICK_UPS_CFG) {
+                    u.desc = u.desc; // ensure set
+                    currentCards.push(makeBuyCard({ ...u, desc: '+'+u.effect+' за клик' }, 'clickUp'));
+                }
+            }
+            else if (currentTab === 'buildings') {
+                contentEl.append(makeBuyModeRow());
+                for (const b of BUILDINGS_CFG) {
+                    currentCards.push(makeBuyCard(b, 'building'));
+                }
+            }
+            else if (currentTab === 'mults') {
+                for (const m of MULTS_CFG) {
+                    const card = makeBuyCard({ ...m, desc: '×' + m.factor + ' ко всему производству' }, 'mult');
+                    currentCards.push(card);
+                }
+            }
+            else if (currentTab === 'achievements') {
+                let bns = 0; for (const a of ACH_CFG) if (state.totalMilk >= a.threshold) bns += a.bonus;
+                contentEl.append(h('div', { style: 'padding: 10px; margin-bottom: 8px; text-align: center; color: #59d98e; font-weight: 800; background: rgba(89,217,142,0.08); border-radius: 8px;', text: 'Бонус к производству: +' + Math.round(bns * 100) + '%' }));
+                for (const a of ACH_CFG) {
+                    const isUnlocked = state.totalMilk >= a.threshold;
+                    contentEl.append(h('div', { class: 'cow-ach ' + (isUnlocked ? 'unlocked' : 'locked') },
+                        h('div', { class: 'cow-ach-icon', text: a.icon }),
+                        h('div', { class: 'cow-ach-info' }, h('div', { class: 'cow-ach-name', text: a.name }), h('div', { class: 'cow-ach-thr', text: 'Накопить ' + cowFmtNum(a.threshold) + ' 🥛' })),
+                        h('div', { class: 'cow-ach-bonus', text: '+' + Math.round(a.bonus * 100) + '%' })
+                    ));
+                }
+            }
+            else if (currentTab === 'prestige') {
+                const cost = Math.floor(5e7 * Math.pow(5, state.prestigeLevel));
+                const can = state.milk >= cost;
+                contentEl.append(h('div', { class: 'cow-prestige-box' },
+                    h('div', { style: 'font-size: 44px; margin-bottom: 6px;', text: '⭐' }),
+                    h('div', { style: 'font-size: 16px; font-weight: 800; color: #f3c969; margin-bottom: 8px;' }, 'Престиж ' + state.prestigeLevel),
+                    h('div', { style: 'font-size: 12px; color: #b8a082; line-height: 1.7; margin-bottom: 14px;' },
+                        'Сброс прогресса. Останется только totalMilk и достижения.', h('br'),
+                        'Сейчас: ×' + Math.pow(1.5, state.prestigeLevel).toFixed(2) + ' → станет: ×' + Math.pow(1.5, state.prestigeLevel + 1).toFixed(2), h('br'),
+                        'Стоимость: ' + cowFmtNum(cost) + ' 🥛'
+                    ),
+                    h('button', {
+                        class: 'cow-tab' + (can ? ' on' : ''), style: 'padding: 12px; width: 100%;' + (can ? '' : ' opacity: 0.5; cursor: not-allowed;'),
+                        text: can ? '⭐ Сделать престиж' : 'Недостаточно молока', onclick: can ? doPrestige : null
+                    })
+                ));
+            }
+            contentEl.append(...currentCards);
+        }
+
+        function spawnFloat(text, e, color, fontSize) {
+            const rect = stageEl.getBoundingClientRect();
+            let cx = rect.width / 2, cy = rect.height / 2;
+            if (e && e.clientX) { cx = e.clientX - rect.left; cy = e.clientY - rect.top; }
+            const el = h('div', { class: 'cow-float', text, style: `left:${cx}px; top:${cy}px;${color ? 'color:' + color + ';' : ''}${fontSize ? 'font-size:' + fontSize + 'px;' : ''}` });
+            stageEl.append(el); setTimeout(() => el.remove(), 1000);
+        }
+
+        function showToast(text) {
+            const el = h('div', { class: 'cow-toast', text });
+            toastContainer.append(el);
+            setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 500); }, 3000);
+        }
+
+        // ============================ ТИКЕР ============================
+        let mounted = true, lastTick = Date.now(), rafId = null;
+        let lastSync = 0;
+
+        function tick() {
+            if (!mounted) return;
+            const now = Date.now();
+            const dt = Math.max(0, Math.min(60, (now - lastTick) / 1000));
+            lastTick = now;
+
+            const mps = getLocalMps();
+            if (mps > 0) { state.milk += mps * dt; state.totalMilk += mps * dt; }
+            updateHeader();
+
+            if (now - lastSync > 10000) {
+                lastSync = now;
+                syncState();
+            }
+            if (now % 1000 < 20) refreshVisibleCards();
+
+            rafId = requestAnimationFrame(tick);
+        }
+
+        // ============================ СТАРТ ============================
+        syncState();
+        lastTick = Date.now();
+        rafId = requestAnimationFrame(tick);
+
+        return {
+            onShow() {
+                mounted = true; lastTick = Date.now();
+                if (!rafId) rafId = requestAnimationFrame(tick);
+                syncState();
+            },
+            onHide() {
+                mounted = false; if (rafId) cancelAnimationFrame(rafId); rafId = null;
+                if (pendingClicks > 0) sendClicks();
+            },
+            destroy() {
+                mounted = false; if (rafId) cancelAnimationFrame(rafId);
+            }
+        };
+    }
+};
 
     // ------------------------------------------------------------------
     // Движок Doom как обычный JavaScript (без WebAssembly: CSP сайта его запрещает).
@@ -35921,6 +36405,7 @@ return asmFunc({ "env": env });
         { id: 'match3', name: '💎 Три в ряд', category: 'solo', modes: [] },
         { id: 'snake', name: '🐍 Змейка', category: 'solo', modes: [{ id: 'classic', name: 'Классика' }, { id: 'wrap', name: 'Без границ' }, { id: 'maze', name: 'Лабиринт' }] },
         { id: 'pong', name: '🏓 Пинг-понг', category: 'solo', modes: [{ id: 'easy', name: 'Легко' }, { id: 'mid', name: 'Средне' }, { id: 'hard', name: 'Сложно' }] },
+        { id: 'cowclicker', name: '🐄 Молочная ферма', category: 'solo', modes: [] },
     ];
 
     async function showLeaderboard() {
@@ -36161,6 +36646,7 @@ return asmFunc({ "env": env });
     register(Pong);
     register(OnlineChess);
     register(Doom);
+    register(CowClicker);
 
     function mount() {
         if (!document.body) return false;
