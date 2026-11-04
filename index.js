@@ -5,7 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// БАЗА ДАННЫХ (REDIS / UPSTASH) - ВЫНЕСЕНО НАВЕРХ ДЛЯ УДОБСТВА
+// БАЗА ДАННЫХ (REDIS / UPSTASH)
 // ============================================================
 const UPSTASH_URL = process.env.UPSTASH_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
@@ -38,35 +38,31 @@ async function redisPipeline(commands) {
 }
 
 // ============================================================
-// 🌟 ЗДЕСЬ НАЧИНАЕТСЯ КОД МОЛОЧНОЙ ФЕРМЫ (КЛИКЕР) 🌟
+// 🌟 МОЛОЧНАЯ ФЕРМА (КЛИКЕР) — КОНФИГУРАЦИЯ 🌟
 // ============================================================
-
-// КОНФИГУРАЦИЯ КЛИКЕРА (БАЛАНС)
 const COW_CONFIG = {
     clickUps: [
-        // kind: 'add' — линейный +N/клик (можно много раз, цена растёт)
-        // kind: 'mult' — ×2 к общему клику (max 1 раз, фикс. цена)
-        { id: 'hand',    kind: 'add',  cost: 15,  effect: 1,    mult: 1.15 },
-        { id: 'bicep',   kind: 'mult', cost: 100, effect: 2,    max: 1 },
-        { id: 'steel',   kind: 'mult', cost: 1e3, effect: 2,    max: 1 },
-        { id: 'diamond', kind: 'mult', cost: 1e5, effect: 2,    max: 1 },
-        { id: 'plasma',  kind: 'mult', cost: 1e7, effect: 2,    max: 1 },
-        { id: 'cosmic',  kind: 'mult', cost: 1e9, effect: 2,    max: 1 },
-        { id: 'divine',  kind: 'mult', cost: 1e12, effect: 2,   max: 1 },
+        { id: 'hand',    kind: 'add',  cost: 15,  effect: 1,  mult: 1.15 },
+        { id: 'bicep',   kind: 'mult', cost: 100, effect: 2,  max: 1 },
+        { id: 'steel',   kind: 'mult', cost: 1e3, effect: 2,  max: 1 },
+        { id: 'diamond', kind: 'mult', cost: 1e5, effect: 2,  max: 1 },
+        { id: 'plasma',  kind: 'mult', cost: 1e7, effect: 2,  max: 1 },
+        { id: 'cosmic',  kind: 'mult', cost: 1e9, effect: 2,  max: 1 },
+        { id: 'divine',  kind: 'mult', cost: 1e12, effect: 2, max: 1 },
     ],
     buildings: [
-        { id: 'cat',      cost: 15,     prod: 0.1,  mult: 1.15 },
-        { id: 'maid',     cost: 100,    prod: 1,    mult: 1.15 },
-        { id: 'auto',     cost: 1.1e3,  prod: 8,    mult: 1.15 },
-        { id: 'plant',    cost: 12e3,   prod: 47,   mult: 1.15 },
-        { id: 'cheese',   cost: 130e3,  prod: 260,  mult: 1.15 },
+        { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15 },
+        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15 },
+        { id: 'auto',     cost: 1.1e3,  prod: 8,     mult: 1.15 },
+        { id: 'plant',    cost: 12e3,   prod: 47,    mult: 1.15 },
+        { id: 'cheese',   cost: 130e3,  prod: 260,   mult: 1.15 },
         { id: 'bank',     cost: 1.4e6,  prod: 1.4e3, mult: 1.15 },
         { id: 'cosmo',    cost: 20e6,   prod: 7.8e3, mult: 1.15 },
-        { id: 'quantum',  cost: 330e6,  prod: 44e3, mult: 1.15 },
+        { id: 'quantum',  cost: 330e6,  prod: 44e3,  mult: 1.15 },
         { id: 'portal',   cost: 5.1e9,  prod: 260e3, mult: 1.15 },
         { id: 'alchemy',  cost: 75e9,   prod: 1.6e6, mult: 1.15 },
-        { id: 'time',     cost: 1e12,   prod: 10e6, mult: 1.15 },
-        { id: 'infinity', cost: 14e12,  prod: 65e6, mult: 1.15 },
+        { id: 'time',     cost: 1e12,   prod: 10e6,  mult: 1.15 },
+        { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15 },
     ],
     mults: [
         { id: 'hay',    cost: 1e4,  factor: 2 },
@@ -88,33 +84,127 @@ const COW_CONFIG = {
         { threshold: 1e34, bonus: 0.10 },
     ],
     milestones: [25, 50, 100, 200, 300, 400, 500],
-    prestigeBase: 1e9,      // было 5e7
-    prestigeStep: 10,       // было 5
-    prestigeMult: 5,        // было 1.5
+    prestigeBase: 1e9,
+    prestigeStep: 10,
+    prestigeMult: 5,
 };
 
+// ============================================================
+// ЦЕПОЧКИ ДОСТИЖЕНИЙ
+// ============================================================
+const CHAIN_ACHIEVEMENTS = [
+    {
+        id: 'clicks', name: 'Кликер', icon: '💪',
+        tiers: [
+            { threshold: 100,     bonus: 0.01 },
+            { threshold: 1000,    bonus: 0.01 },
+            { threshold: 10000,   bonus: 0.02 },
+            { threshold: 100000,  bonus: 0.02 },
+            { threshold: 1000000, bonus: 0.03 },
+        ]
+    },
+    {
+        id: 'golden', name: 'Охотник на коров', icon: '🐮✨',
+        tiers: [
+            { threshold: 1,   bonus: 0.01 },
+            { threshold: 5,   bonus: 0.01 },
+            { threshold: 25,  bonus: 0.02 },
+            { threshold: 50,  bonus: 0.02 },
+            { threshold: 100, bonus: 0.03 },
+        ]
+    },
+    {
+        id: 'slimes', name: 'Ловец слизней', icon: '🪱',
+        tiers: [
+            { threshold: 1,   bonus: 0.01 },
+            { threshold: 10,  bonus: 0.01 },
+            { threshold: 50,  bonus: 0.01 },
+            { threshold: 100, bonus: 0.02 },
+            { threshold: 500, bonus: 0.02 },
+        ]
+    },
+    {
+        id: 'cases', name: 'Коллекционер', icon: '📦',
+        tiers: [
+            { threshold: 1,   bonus: 0.01 },
+            { threshold: 10,  bonus: 0.01 },
+            { threshold: 50,  bonus: 0.01 },
+            { threshold: 100, bonus: 0.02 },
+            { threshold: 500, bonus: 0.02 },
+        ]
+    },
+    {
+        id: 'prestige', name: 'Перерождение', icon: '⭐',
+        tiers: [
+            { threshold: 1,  bonus: 0.01 },
+            { threshold: 3,  bonus: 0.02 },
+            { threshold: 5,  bonus: 0.02 },
+            { threshold: 10, bonus: 0.03 },
+            { threshold: 20, bonus: 0.05 },
+        ]
+    },
+    {
+        id: 'buildings', name: 'Империя', icon: '🏠',
+        tiers: [
+            { threshold: 10,   bonus: 0.01 },
+            { threshold: 100,  bonus: 0.01 },
+            { threshold: 500,  bonus: 0.02 },
+            { threshold: 1000, bonus: 0.02 },
+            { threshold: 5000, bonus: 0.03 },
+        ]
+    },
+];
+
+// ============================================================
+// ЗОЛОТАЯ КОРОВА
+// ============================================================
+const GOLDEN_BUFFS = [
+    { id: 'lucky',       weight: 40, type: 'milk' },
+    { id: 'frenzy',      weight: 30, type: 'mps',      mult: 7,   duration: 15000 },
+    { id: 'clickFrenzy', weight: 15, type: 'cp',       mult: 777, duration: 10000 },
+    { id: 'building',    weight: 10, type: 'building', mult: 2,   duration: 20000 },
+    { id: 'milkRain',    weight: 5,  type: 'mps',      mult: 15,  duration: 10000 },
+];
+
+const GOLDEN_BUFF_DESC = {
+    lucky:       '✨ Молочный дождь!',
+    frenzy:      '🔥 Frenzy ×7 (15с)',
+    clickFrenzy: '💥 Click Frenzy ×777 (10с)',
+    building:    '🏭 Building Special ×2 (20с)',
+    milkRain:    '🌊 Milk Rain ×15 (10с)',
+};
+
+function rollGoldenBuff() {
+    const total = GOLDEN_BUFFS.reduce((s, b) => s + b.weight, 0);
+    let r = Math.random() * total;
+    for (const b of GOLDEN_BUFFS) {
+        r -= b.weight;
+        if (r <= 0) return b;
+    }
+    return GOLDEN_BUFFS[0];
+}
+
+// ============================================================
+// СКИНЫ
+// ============================================================
 const COW_SKINS = [
-    // 🟢 Common — 60% шанс
     { id: 'normal',  name: 'Обычная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'cool',    name: 'Ледяная',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'pink',    name: 'Розовая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
     { id: 'green',   name: 'Луговая',       icon: '🐄', rarity: 'common',    chance: 15,   price: 40 },
-    // 🔵 Rare — 25% шанс
     { id: 'golden',  name: 'Золотая',       icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
     { id: 'purple',  name: 'Аметистовая',   icon: '🐄', rarity: 'rare',      chance: 12.5, price: 150 },
-    // 🟣 Epic — 12% шанс
     { id: 'ghost',   name: 'Призрачная',    icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
     { id: 'cyber',   name: 'Кибер-корова',  icon: '🐄', rarity: 'epic',      chance: 6,    price: 400 },
-    // 🟡 Legendary — 3% шанс
     { id: 'diamond', name: 'Алмазная',      icon: '🐄', rarity: 'legendary', chance: 1.5,  price: 1500 },
     { id: 'divine',  name: 'Божественная',  icon: '🐮', rarity: 'legendary', chance: 1.5,  price: 1500 }
 ];
-// Бонусы от скинов
+
 const SKIN_BONUSES = {
     normal:  { type: 'mps',      value: 0.02, desc: '+2% к производству' },
     cool:    { type: 'cp',       value: 0.03, desc: '+3% к силе клика' },
-    pink:    { type: 'crystals', value: 0.10, desc: '+10% к кристаллам' }, // <--- БЫЛО 0.05
-    green:   { type: 'slime',    value: 0.10, desc: '+10% к награде Золотой коровы' },
+    pink:    { type: 'crystals', value: 0.10, desc: '+10% к кристаллам' },
+    green:   { type: 'slime',    value: 0.10, desc: '+10% к награде слизня' },
     golden:  { type: 'mps',      value: 0.08, desc: '+8% к производству' },
     purple:  { type: 'cp',       value: 0.08, desc: '+8% к силе клика' },
     ghost:   { type: 'mps',      value: 0.15, desc: '+15% к производству' },
@@ -138,15 +228,53 @@ function getNextMidnightMSK() {
     return now.getTime() - (3 * 60 * 60 * 1000);
 }
 
+// ============================================================
+// ХРАНИЛИЩЕ КЛИКЕРА
+// ============================================================
+const COW_VERSION = 2;
 const cowStates = new Map();
 
+// ============================================================
+// ХЕЛПЕРЫ ЦЕПОЧЕК
+// ============================================================
+function getChainStat(s, chainId) {
+    switch (chainId) {
+        case 'clicks':    return s.clicksTotal || 0;
+        case 'golden':    return s.goldenCowsCaught || 0;
+        case 'slimes':    return s.slimesCaught || 0;
+        case 'cases':     return s.casesOpened || 0;
+        case 'prestige':  return s.prestigeLevel || 0;
+        case 'buildings': return Object.values(s.buildings || {}).reduce((a, b) => a + (b || 0), 0);
+        default: return 0;
+    }
+}
+
+function calcChainBonus(s) {
+    let total = 0;
+    for (const chain of CHAIN_ACHIEVEMENTS) {
+        const stat = getChainStat(s, chain.id);
+        for (const tier of chain.tiers) {
+            if (stat >= tier.threshold) total += tier.bonus;
+        }
+    }
+    return total;
+}
+
+// ============================================================
+// РАСЧЁТ МАТЕМАТИКИ
+// ============================================================
 function calcCowMath(s) {
     let achBonus = 0;
     for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
+    achBonus += calcChainBonus(s);
+
     let gMult = 1;
     for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
     gMult *= (1 + achBonus);
+
+    const now = Date.now();
+    const buff = (s.activeBuff && s.activeBuff.endsAt > now) ? s.activeBuff : null;
 
     const mpsBonus = getSkinBonus(s, 'mps');
     const cpBonus = getSkinBonus(s, 'cp');
@@ -156,9 +284,11 @@ function calcCowMath(s) {
         const owned = s.buildings[b.id] || 0;
         let mileMult = 1;
         for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
-        mps += owned * b.prod * mileMult;
+        const buildingBuff = (buff && buff.type === 'building' && buff.buildingId === b.id) ? buff.mult : 1;
+        mps += owned * b.prod * mileMult * buildingBuff;
     }
-    mps *= gMult * mpsBonus;
+    const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
+    mps *= gMult * mpsBonus * mpsBuff;
 
     let cp = 1;
     for (const u of COW_CONFIG.clickUps) {
@@ -166,7 +296,8 @@ function calcCowMath(s) {
         if (u.kind === 'mult') cp *= Math.pow(u.effect, owned);
         else cp += owned * u.effect;
     }
-    cp *= gMult * cpBonus;
+    const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
+    cp *= gMult * cpBonus * cpBuff;
 
     return { mps, cp };
 }
@@ -183,7 +314,6 @@ function tickCow(s) {
 async function getCowState(playerId) {
     let state = cowStates.get(playerId);
 
-    // Если в памяти лежит старый формат — выкидываем его
     if (state && state.version !== COW_VERSION) {
         cowStates.delete(playerId);
         state = null;
@@ -192,17 +322,17 @@ async function getCowState(playerId) {
     if (!state) {
         const raw = await redis('GET', 'cow:' + playerId);
         state = raw ? JSON.parse(raw) : null;
-
-        // Сейв из Redis со старой версией — тоже считаем отсутствующим
         if (state && state.version !== COW_VERSION) state = null;
 
         if (!state) {
             state = {
-                version: COW_VERSION,                 // ← метка формата
+                version: COW_VERSION,
                 milk: 0, totalMilk: 0, lastUpdate: Date.now(),
                 clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
                 nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
-                crystals: 0, cases: 0, lastSlimeClick: 0
+                crystals: 0, cases: 0, lastSlimeClick: 0,
+                activeBuff: null, lastGoldenAt: 0, goldenCowsCaught: 0,
+                clicksTotal: 0, slimesCaught: 0, casesOpened: 0,
             };
         }
 
@@ -211,9 +341,17 @@ async function getCowState(playerId) {
         if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
         if (!state.currentSkin) state.currentSkin = 'normal';
         if (state.lastSlimeClick == null) state.lastSlimeClick = 0;
+        if (state.activeBuff === undefined) state.activeBuff = null;
+        if (state.lastGoldenAt == null) state.lastGoldenAt = 0;
+        if (state.goldenCowsCaught == null) state.goldenCowsCaught = 0;
+        if (state.clicksTotal == null) state.clicksTotal = 0;
+        if (state.slimesCaught == null) state.slimesCaught = 0;
+        if (state.casesOpened == null) state.casesOpened = 0;
 
         cowStates.set(playerId, state);
     }
+
+    if (state.activeBuff && state.activeBuff.endsAt <= Date.now()) state.activeBuff = null;
 
     tickCow(state);
     return state;
@@ -230,9 +368,8 @@ setInterval(() => {
 }, 60000).unref?.();
 
 // ============================================================
-// 🌟 КОНЕЦ БЛОКА КОНФИГУРАЦИИ КЛИКЕРА, ДАЛЬШЕ ОБЩИЕ НАСТРОЙКИ 🌟
+// ОБЩИЕ НАСТРОЙКИ СЕРВЕРА
 // ============================================================
-
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 app.set('trust proxy', TRUST_PROXY ? 1 : false);
 
@@ -267,7 +404,7 @@ const GAME_RULES = {
     'chess':         { lower: false, maxScore: 99999,   minSeconds: 0 },
     'checkers-mp':   { lower: false, maxScore: 99999,   minSeconds: 0 },
     'chess-mp':      { lower: false, maxScore: 99999,   minSeconds: 0 },
-    'cowclicker':    { lower: false, maxScore: 1e18, minSeconds: 60 },
+    'cowclicker':    { lower: false, maxScore: 1e18,    minSeconds: 60 },
 };
 
 const nowMs = () => Date.now();
@@ -277,6 +414,9 @@ function sanitizeNickname(n) {
     return String(n || '').replace(/[<>&"'\x00-\x1f\x7f]/g, '').substring(0, 20).trim() || 'Аноним';
 }
 
+// ============================================================
+// ХРАНИЛИЩА
+// ============================================================
 const players = new Map();
 const tokensToPlayers = new Map();
 const matches = {};
@@ -287,6 +427,9 @@ const leaderboards = {};
 const gameSessions = new Map();
 const playerGameSessions = new Map();
 
+// ============================================================
+// АВТОРИЗАЦИЯ
+// ============================================================
 function getAuthedPlayerId(req) {
     const auth = req.headers.authorization;
     if (!auth || !auth.startsWith('Bearer ')) return null;
@@ -312,6 +455,9 @@ function cleanupInactivePlayers(thresholdMs) {
     return removed;
 }
 
+// ============================================================
+// MIDDLEWARE
+// ============================================================
 app.use((req, res, next) => {
     res.header('X-Content-Type-Options', 'nosniff');
     res.header('X-Frame-Options', 'DENY');
@@ -355,6 +501,9 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '32kb' }));
 
+// ============================================================
+// РЕГИСТРАЦИЯ ИГРОКОВ
+// ============================================================
 app.post('/api/player/register', async (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit('reg:' + ip, 60, 60 * 60 * 1000)) {
@@ -362,7 +511,7 @@ app.post('/api/player/register', async (req, res) => {
     }
     if (players.size >= MAX_PLAYERS) cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL);
     if (players.size >= MAX_PLAYERS) return res.status(503).json({ success: false, error: 'Сервер перегружен' });
-    
+
     const playerId = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('hex');
     const now = nowMs();
@@ -375,6 +524,9 @@ app.post('/api/player/register', async (req, res) => {
 
 setInterval(() => { cleanupInactivePlayers(nowMs() - PLAYER_INACTIVE_TTL); }, 60 * 60 * 1000).unref?.();
 
+// ============================================================
+// ЛИДЕРБОРД
+// ============================================================
 async function loadLeaderboardsFromDB() {
     if (!UPSTASH_URL) return;
     const allPlayers = await redis('HGETALL', 'players_db');
@@ -429,6 +581,9 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
+// ============================================================
+// СЕССИИ (АНТИЧИТ)
+// ============================================================
 app.post('/api/session/start', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -437,7 +592,7 @@ app.post('/api/session/start', (req, res) => {
     if (!GAME_RULES[gameId]) return res.status(400).json({ success: false, error: 'Неизвестная игра' });
     if (gameSessions.size >= MAX_SESSIONS) return res.status(503).json({ success: false, error: 'Сервер перегружен' });
     if (!checkRateLimit('sess:' + playerId, SESSION_RATE_MAX, SESSION_RATE_WINDOW_MS)) return res.status(429).json({ success: false, error: 'Слишком часто. Подождите.' });
-    
+
     const pairKey = playerId + ':' + gameId;
     const oldSid = playerGameSessions.get(pairKey);
     if (oldSid) gameSessions.delete(oldSid);
@@ -458,6 +613,9 @@ setInterval(() => {
     }
 }, SESSION_CLEANUP_MS).unref?.();
 
+// ============================================================
+// ОЧКИ (ЛИДЕРБОРД)
+// ============================================================
 app.post('/api/scores', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -564,19 +722,20 @@ app.post('/api/cow/click', async (req, res) => {
         const p = players.get(playerId);
         if (p) {
             p.nickname = sanitizeNickname(nickname);
-            redis('HSET', 'players_db', p.token, JSON.stringify({ playerId, createdAt: p.createdAt, lastActiveAt: p.lastActiveAt, nickname: p.nickname })).catch(()=>{});
+            redis('HSET', 'players_db', p.token, JSON.stringify({ playerId, createdAt: p.createdAt, lastActiveAt: p.lastActiveAt, nickname: p.nickname })).catch(() => {});
         }
     }
 
     const state = await getCowState(playerId);
     const now = Date.now();
     const timeDiff = (now - (state.lastClickTime || now - 1000)) / 1000;
-    
+
     if (clicks > timeDiff * 20 + 5) return res.status(400).json({ success: false, error: 'Античит: слишком быстро' });
 
     const { cp } = calcCowMath(state);
     state.milk += clicks * cp;
     state.totalMilk += clicks * cp;
+    state.clicksTotal = (state.clicksTotal || 0) + clicks;
     state.lastClickTime = now;
     state.lastUpdate = now;
     syncCowLeaderboard(playerId, state);
@@ -589,7 +748,7 @@ app.post('/api/cow/buy', async (req, res) => {
     const { type, id } = req.body;
     let { qty } = req.body;
     if (!qty || typeof qty !== 'number' || qty <= 0) return res.status(400).json({ success: false });
-    
+
     const state = await getCowState(playerId);
     tickCow(state);
 
@@ -604,25 +763,32 @@ app.post('/api/cow/buy', async (req, res) => {
         state.milk -= price;
         state.buildings[id] = owned + qty;
     } else if (type === 'clickUp') {
-    const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
-    if (!cfg) return res.status(400).json({ success: false });
-    const owned = state.clickUps[id] || 0;
-    if (cfg.max && owned >= cfg.max) return res.status(400).json({ success: false, error: 'Уже куплено' });
+        const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
+        if (!cfg) return res.status(400).json({ success: false });
+        const owned = state.clickUps[id] || 0;
+        if (cfg.max && owned >= cfg.max) return res.status(400).json({ success: false, error: 'Уже куплено' });
 
-    let price, buyQty;
-    if (cfg.max) {
-        price = Math.floor(cfg.cost);
-        buyQty = 1;
-    } else {
-        buyQty = qty;
-        price = 0;
-        for (let i = 0; i < buyQty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
-        price = Math.floor(price);
+        let price, buyQty;
+        if (cfg.max) {
+            price = Math.floor(cfg.cost);
+            buyQty = 1;
+        } else {
+            buyQty = qty;
+            price = 0;
+            for (let i = 0; i < buyQty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
+            price = Math.floor(price);
+        }
+        if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+        state.milk -= price;
+        state.clickUps[id] = owned + buyQty;
+    } else if (type === 'mult') {
+        qty = 1;
+        const cfg = COW_CONFIG.mults.find(m => m.id === id);
+        if (!cfg || state.multipliers[id]) return res.status(400).json({ success: false });
+        if (state.milk < cfg.cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+        state.milk -= cfg.cost;
+        state.multipliers[id] = true;
     }
-    if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
-    state.milk -= price;
-    state.clickUps[id] = owned + buyQty;
-}
 
     saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
@@ -664,6 +830,7 @@ app.post('/api/cow/open-case', async (req, res) => {
     const state = await getCowState(playerId);
     if (state.cases <= 0) return res.status(400).json({ success: false, error: 'Нет кейсов' });
     state.cases -= 1;
+    state.casesOpened = (state.casesOpened || 0) + 1;
 
     let roll = Math.random() * 100;
     let selectedSkin = COW_SKINS[0];
@@ -678,7 +845,6 @@ app.post('/api/cow/open-case', async (req, res) => {
     if (state.unlockedSkins.includes(selectedSkin.id)) {
         isDuplicate = true;
         let baseCrystals = DUP_CRYSTALS[selectedSkin.rarity] || 0;
-        // Бонус от скина к кристаллам
         const crystalBonus = getSkinBonus(state, 'crystals');
         crystalsGained = Math.floor(baseCrystals * crystalBonus);
         state.crystals += crystalsGained;
@@ -725,10 +891,11 @@ app.post('/api/cow/slime', async (req, res) => {
     }
 
     state.lastSlimeClick = now;
-        const { mps } = calcCowMath(state);
+    state.slimesCaught = (state.slimesCaught || 0) + 1;
+    const { mps } = calcCowMath(state);
     let rewardMilk = 0;
     let rewardCrystals = 0;
-    
+
     if (Math.random() > 0.5) {
         const slimeBonus = getSkinBonus(state, 'slime');
         rewardMilk = Math.floor(mps * 120 * slimeBonus);
@@ -755,9 +922,68 @@ app.post('/api/cow/slime/escape', async (req, res) => {
 });
 
 // ============================================================
-// КОНЕЦ БЛОКА ФЕРМЫ. ДАЛЬШЕ ИДЕТ МУЛЬТИПЛЕЕР (ШАХМАТЫ И ШАШКИ)
+// ЗОЛОТАЯ КОРОВА
 // ============================================================
+app.post('/api/cow/golden-cow', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const state = await getCowState(playerId);
+    const now = Date.now();
 
+    if (now - (state.lastGoldenAt || 0) < 60000) {
+        return res.status(400).json({ success: false, error: 'Слишком часто' });
+    }
+
+    state.lastGoldenAt = now;
+    state.goldenCowsCaught = (state.goldenCowsCaught || 0) + 1;
+
+    const buff = rollGoldenBuff();
+    const { mps, cp } = calcCowMath(state);
+
+    let rewardMilk = 0;
+    let buffDesc = GOLDEN_BUFF_DESC[buff.id] || buff.id;
+
+    if (buff.type === 'milk') {
+        rewardMilk = Math.floor(Math.max(mps * 300, cp * 13, 100));
+        state.milk += rewardMilk;
+        state.totalMilk += rewardMilk;
+    } else {
+        let buildingId = null;
+        if (buff.type === 'building') {
+            const ownedIds = COW_CONFIG.buildings
+                .filter(b => (state.buildings[b.id] || 0) > 0)
+                .map(b => b.id);
+            if (ownedIds.length === 0) {
+                rewardMilk = Math.floor(Math.max(cp * 13, 100));
+                state.milk += rewardMilk;
+                state.totalMilk += rewardMilk;
+                buffDesc = GOLDEN_BUFF_DESC.lucky;
+                saveCowState(playerId);
+                syncCowLeaderboard(playerId, state);
+                return res.json({ success: true, state, rewardMilk, buffDesc });
+            }
+            buildingId = ownedIds[Math.floor(Math.random() * ownedIds.length)];
+        }
+
+        state.activeBuff = {
+            id: buff.id,
+            type: buff.type,
+            mult: buff.mult || 1,
+            buildingId,
+            startsAt: now,
+            endsAt: now + buff.duration,
+            desc: buffDesc,
+        };
+    }
+
+    saveCowState(playerId);
+    syncCowLeaderboard(playerId, state);
+    res.json({ success: true, state, rewardMilk, buffDesc });
+});
+
+// ============================================================
+// МУЛЬТИПЛЕЕР: ШАХМАТЫ И ШАШКИ
+// ============================================================
 function finishMatch(match, winner, reason) {
     if (match.status === 'finished') return;
     match.status = 'finished';
@@ -830,6 +1056,9 @@ function checkChessDraw(match) {
     return null;
 }
 
+// ============================================================
+// ДВИЖОК ШАШЕК
+// ============================================================
 const CK = (() => {
     const DIRS = [[-1, -1], [-1, 1], [1, -1], [1, 1]];
     const colorOf = (p) => (!p ? null : (p === 'w' || p === 'W' ? 'w' : 'b'));
@@ -941,6 +1170,9 @@ const CK = (() => {
     return { startPos, legal, make };
 })();
 
+// ============================================================
+// ДВИЖОК ШАХМАТ
+// ============================================================
 const CH = (() => {
     const isW = (p) => p === p.toUpperCase();
     const colorOf = (p) => (isW(p) ? 'w' : 'b');
@@ -1035,6 +1267,9 @@ const CH = (() => {
     return { startPos, legal, make, inCheck, key, insufficient };
 })();
 
+// ============================================================
+// API ШАШКИ ОНЛАЙН
+// ============================================================
 app.post('/api/checkers/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -1158,6 +1393,9 @@ app.post('/api/checkers/match/:matchId/surrender', (req, res) => {
     res.json({ success: true });
 });
 
+// ============================================================
+// API ШАХМАТЫ ОНЛАЙН
+// ============================================================
 app.post('/api/chess/find-match', (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false, error: 'Не авторизован' });
@@ -1178,7 +1416,7 @@ app.post('/api/chess/find-match', (req, res) => {
         const startState = CH.startPos();
         chessMatches[matchId] = {
             id: matchId,
-            players: [ { id: opponent.id, nickname: opponent.nickname, color: 'w' }, { id: playerId, nickname, color: 'b' } ],
+            players: [{ id: opponent.id, nickname: opponent.nickname, color: 'w' }, { id: playerId, nickname, color: 'b' }],
             status: 'playing', gameState: startState, winner: null, endReason: null, createdAt: now, finishedAt: null,
             history: [CH.key(startState)], lastSeen: { [opponent.id]: now, [playerId]: now }
         };
@@ -1262,6 +1500,9 @@ app.post('/api/chess/match/:matchId/surrender', (req, res) => {
     res.json({ success: true });
 });
 
+// ============================================================
+// ОЧИСТКА СТАРЫХ МАТЧЕЙ
+// ============================================================
 setInterval(() => {
     const now = nowMs();
     for (const id of Object.keys(matches)) {
@@ -1290,6 +1531,9 @@ setInterval(() => {
     }
 }, 30 * 1000).unref?.();
 
+// ============================================================
+// ОТМЕНА ПОИСКА
+// ============================================================
 function makeCancelHandler(queueName) {
     return (req, res) => {
         const playerId = getAuthedPlayerId(req);
@@ -1304,6 +1548,9 @@ function makeCancelHandler(queueName) {
 app.post('/api/checkers/cancel', makeCancelHandler('checkers'));
 app.post('/api/chess/cancel',    makeCancelHandler('chess'));
 
+// ============================================================
+// СТАРТ
+// ============================================================
 app.get('/', (req, res) => res.send('Legion Arcade Server 🐾'));
 
 async function startServer() {
