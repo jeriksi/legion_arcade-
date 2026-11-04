@@ -44,50 +44,53 @@ async function redisPipeline(commands) {
 // КОНФИГУРАЦИЯ КЛИКЕРА (БАЛАНС)
 const COW_CONFIG = {
     clickUps: [
-        { id: 'hands',   cost: 15,     effect: 1,      mult: 1.15 },
-        { id: 'bicep',   cost: 500,    effect: 10,     mult: 1.20 },
-        { id: 'steel',   cost: 5e4,    effect: 100,    mult: 1.25 },
-        { id: 'diamond', cost: 5e6,    effect: 1000,   mult: 1.30 },
-        { id: 'plasma',  cost: 5e8,    effect: 1e4,    mult: 1.35 },
-        { id: 'cosmic',  cost: 5e10,   effect: 1e5,    mult: 1.40 },
-        { id: 'divine',  cost: 5e12,   effect: 1e6,    mult: 1.50 },
+        // kind: 'add' — линейный +N/клик (можно много раз, цена растёт)
+        // kind: 'mult' — ×2 к общему клику (max 1 раз, фикс. цена)
+        { id: 'hand',    kind: 'add',  cost: 15,  effect: 1,    mult: 1.15 },
+        { id: 'bicep',   kind: 'mult', cost: 100, effect: 2,    max: 1 },
+        { id: 'steel',   kind: 'mult', cost: 1e3, effect: 2,    max: 1 },
+        { id: 'diamond', kind: 'mult', cost: 1e5, effect: 2,    max: 1 },
+        { id: 'plasma',  kind: 'mult', cost: 1e7, effect: 2,    max: 1 },
+        { id: 'cosmic',  kind: 'mult', cost: 1e9, effect: 2,    max: 1 },
+        { id: 'divine',  kind: 'mult', cost: 1e12, effect: 2,   max: 1 },
     ],
     buildings: [
-        { id: 'cat',      cost: 15,     prod: 0.15,  mult: 1.15 },
-        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15 },
-        { id: 'auto',     cost: 1100,   prod: 8,     mult: 1.15 },
-        { id: 'plant',    cost: 12000,  prod: 47,    mult: 1.15 },
-        { id: 'cheese',   cost: 130000, prod: 260,   mult: 1.15 },
-        { id: 'bank',     cost: 1.4e6,  prod: 1400,  mult: 1.15 },
-        { id: 'cosmo',    cost: 2e7,    prod: 7800,  mult: 1.15 },
-        { id: 'quantum',  cost: 3.3e8,  prod: 4.4e4, mult: 1.15 },
-        { id: 'portal',   cost: 5.1e9,  prod: 2.6e5, mult: 1.15 },
-        { id: 'alchemy',  cost: 7.5e10, prod: 1.6e6, mult: 1.15 },
-        { id: 'time',     cost: 1e12,   prod: 1e7,   mult: 1.15 },
-        { id: 'infinity', cost: 1.4e13, prod: 6.5e7, mult: 1.15 },
+        { id: 'cat',      cost: 15,     prod: 0.1,  mult: 1.15 },
+        { id: 'maid',     cost: 100,    prod: 1,    mult: 1.15 },
+        { id: 'auto',     cost: 1.1e3,  prod: 8,    mult: 1.15 },
+        { id: 'plant',    cost: 12e3,   prod: 47,   mult: 1.15 },
+        { id: 'cheese',   cost: 130e3,  prod: 260,  mult: 1.15 },
+        { id: 'bank',     cost: 1.4e6,  prod: 1.4e3, mult: 1.15 },
+        { id: 'cosmo',    cost: 20e6,   prod: 7.8e3, mult: 1.15 },
+        { id: 'quantum',  cost: 330e6,  prod: 44e3, mult: 1.15 },
+        { id: 'portal',   cost: 5.1e9,  prod: 260e3, mult: 1.15 },
+        { id: 'alchemy',  cost: 75e9,   prod: 1.6e6, mult: 1.15 },
+        { id: 'time',     cost: 1e12,   prod: 10e6, mult: 1.15 },
+        { id: 'infinity', cost: 14e12,  prod: 65e6, mult: 1.15 },
     ],
     mults: [
         { id: 'hay',    cost: 1e4,  factor: 2 },
-        { id: 'gmo',    cost: 1e5,  factor: 2 },
-        { id: 'wonder', cost: 1e6,  factor: 3 },
-        { id: 'nano',   cost: 1e7,  factor: 3 },
-        { id: 'legend', cost: 1e8,  factor: 5 },
-        { id: 'meta',   cost: 1e10, factor: 5 },
-        { id: 'void',   cost: 1e12, factor: 10 },
+        { id: 'gmo',    cost: 1e6,  factor: 2 },
+        { id: 'wonder', cost: 1e8,  factor: 2 },
+        { id: 'nano',   cost: 1e10, factor: 2 },
+        { id: 'legend', cost: 1e12, factor: 3 },
+        { id: 'meta',   cost: 1e15, factor: 3 },
+        { id: 'void',   cost: 1e18, factor: 3 },
     ],
     achievements: [
-        { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e4,  bonus: 0.01 },
-        { threshold: 1e5,  bonus: 0.01 }, { threshold: 1e6,  bonus: 0.02 },
-        { threshold: 1e7,  bonus: 0.02 }, { threshold: 1e8,  bonus: 0.02 },
-        { threshold: 1e9,  bonus: 0.03 }, { threshold: 1e10, bonus: 0.03 },
-        { threshold: 1e11, bonus: 0.03 }, { threshold: 1e12, bonus: 0.05 },
-        { threshold: 1e13, bonus: 0.05 }, { threshold: 1e14, bonus: 0.05 },
-        { threshold: 1e15, bonus: 0.10 }, { threshold: 1e16, bonus: 0.10 },
+        { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e5,  bonus: 0.01 },
+        { threshold: 1e7,  bonus: 0.01 }, { threshold: 1e9,  bonus: 0.02 },
+        { threshold: 1e11, bonus: 0.02 }, { threshold: 1e13, bonus: 0.02 },
+        { threshold: 1e15, bonus: 0.03 }, { threshold: 1e17, bonus: 0.03 },
+        { threshold: 1e19, bonus: 0.03 }, { threshold: 1e21, bonus: 0.05 },
+        { threshold: 1e23, bonus: 0.05 }, { threshold: 1e25, bonus: 0.05 },
+        { threshold: 1e28, bonus: 0.10 }, { threshold: 1e31, bonus: 0.10 },
+        { threshold: 1e34, bonus: 0.10 },
     ],
     milestones: [25, 50, 100, 200, 300, 400, 500],
-    prestigeBase: 5e7,
-    prestigeStep: 5,
-    prestigeMult: 1.5,
+    prestigeBase: 1e9,      // было 5e7
+    prestigeStep: 10,       // было 5
+    prestigeMult: 5,        // было 1.5
 };
 
 const COW_SKINS = [
@@ -144,8 +147,7 @@ function calcCowMath(s) {
     for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
     gMult *= (1 + achBonus);
-    
-    // Применяем бонус от скина
+
     const mpsBonus = getSkinBonus(s, 'mps');
     const cpBonus = getSkinBonus(s, 'cp');
 
@@ -156,13 +158,15 @@ function calcCowMath(s) {
         for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
         mps += owned * b.prod * mileMult;
     }
-    mps *= gMult;
-    mps *= mpsBonus; // <--- Бонус скина к MPS
+    mps *= gMult * mpsBonus;
 
     let cp = 1;
-    for (const u of COW_CONFIG.clickUps) cp += (s.clickUps[u.id] || 0) * u.effect;
-    cp *= gMult;
-    cp *= cpBonus; // <--- Бонус скина к Клику
+    for (const u of COW_CONFIG.clickUps) {
+        const owned = s.clickUps[u.id] || 0;
+        if (u.kind === 'mult') cp *= Math.pow(u.effect, owned);
+        else cp += owned * u.effect;
+    }
+    cp *= gMult * cpBonus;
 
     return { mps, cp };
 }
@@ -177,22 +181,41 @@ function tickCow(s) {
 }
 
 async function getCowState(playerId) {
-    if (cowStates.has(playerId)) return cowStates.get(playerId);
-    const raw = await redis('GET', 'cow:' + playerId);
-    let state = raw ? JSON.parse(raw) : { 
-        milk: 0, totalMilk: 0, lastUpdate: Date.now(), 
-        clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
-        nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
-        crystals: 0, cases: 0, lastSlimeClick: 0
-    };
-    if (state.crystals == null) state.crystals = 0;
-    if (state.cases == null) state.cases = 0;
-    if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
-    if (!state.currentSkin) state.currentSkin = 'normal';
-    if (state.lastSlimeClick == null) state.lastSlimeClick = 0;
+    let state = cowStates.get(playerId);
+
+    // Если в памяти лежит старый формат — выкидываем его
+    if (state && state.version !== COW_VERSION) {
+        cowStates.delete(playerId);
+        state = null;
+    }
+
+    if (!state) {
+        const raw = await redis('GET', 'cow:' + playerId);
+        state = raw ? JSON.parse(raw) : null;
+
+        // Сейв из Redis со старой версией — тоже считаем отсутствующим
+        if (state && state.version !== COW_VERSION) state = null;
+
+        if (!state) {
+            state = {
+                version: COW_VERSION,                 // ← метка формата
+                milk: 0, totalMilk: 0, lastUpdate: Date.now(),
+                clickUps: {}, buildings: {}, multipliers: {}, prestigeLevel: 0,
+                nextCaseTime: 0, unlockedSkins: ['normal'], currentSkin: 'normal',
+                crystals: 0, cases: 0, lastSlimeClick: 0
+            };
+        }
+
+        if (state.crystals == null) state.crystals = 0;
+        if (state.cases == null) state.cases = 0;
+        if (!state.unlockedSkins) state.unlockedSkins = ['normal'];
+        if (!state.currentSkin) state.currentSkin = 'normal';
+        if (state.lastSlimeClick == null) state.lastSlimeClick = 0;
+
+        cowStates.set(playerId, state);
+    }
 
     tickCow(state);
-    cowStates.set(playerId, state);
     return state;
 }
 
@@ -581,23 +604,25 @@ app.post('/api/cow/buy', async (req, res) => {
         state.milk -= price;
         state.buildings[id] = owned + qty;
     } else if (type === 'clickUp') {
-        const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
-        if (!cfg) return res.status(400).json({ success: false });
-        const owned = state.clickUps[id] || 0;
-        let price = 0;
-        for (let i = 0; i < qty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
+    const cfg = COW_CONFIG.clickUps.find(u => u.id === id);
+    if (!cfg) return res.status(400).json({ success: false });
+    const owned = state.clickUps[id] || 0;
+    if (cfg.max && owned >= cfg.max) return res.status(400).json({ success: false, error: 'Уже куплено' });
+
+    let price, buyQty;
+    if (cfg.max) {
+        price = Math.floor(cfg.cost);
+        buyQty = 1;
+    } else {
+        buyQty = qty;
+        price = 0;
+        for (let i = 0; i < buyQty; i++) price += cfg.cost * Math.pow(cfg.mult, owned + i);
         price = Math.floor(price);
-        if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
-        state.milk -= price;
-        state.clickUps[id] = owned + qty;
-    } else if (type === 'mult') {
-        qty = 1;
-        const cfg = COW_CONFIG.mults.find(m => m.id === id);
-        if (!cfg || state.multipliers[id]) return res.status(400).json({ success: false });
-        if (state.milk < cfg.cost) return res.status(400).json({ success: false, error: 'Не хватает молока' });
-        state.milk -= cfg.cost;
-        state.multipliers[id] = true;
     }
+    if (state.milk < price) return res.status(400).json({ success: false, error: 'Не хватает молока' });
+    state.milk -= price;
+    state.clickUps[id] = owned + buyQty;
+}
 
     saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
