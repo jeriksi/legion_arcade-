@@ -167,11 +167,11 @@ const GOLDEN_BUFFS = [
 ];
 
 const GOLDEN_BUFF_DESC = {
-    lucky:       '✨ Молочный дождь!',
-    frenzy:      '🔥 Frenzy ×7 (15с)',
-    clickFrenzy: '💥 Click Frenzy ×777 (10с)',
-    building:    '🏭 Building Special ×2 (20с)',
-    milkRain:    '🌊 Milk Rain ×15 (10с)',
+    lucky:       '✨ Удача! Мгновенное молоко',
+    frenzy:      '🔥 Бешенство ×7 (15с)',
+    clickFrenzy: '💥 Бешеный клик ×777 (10с)',
+    building:    '🏭 Сила зданий ×2 (20с)',
+    milkRain:    '🌊 Молочный дождь ×15 (10с)',
 };
 
 function rollGoldenBuff() {
