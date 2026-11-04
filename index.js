@@ -42,13 +42,14 @@ async function redisPipeline(commands) {
 // ============================================================
 const COW_CONFIG = {
     clickUps: [
-        { id: 'hand',    kind: 'add',  cost: 15,  effect: 1,  mult: 1.15 },
-        { id: 'bicep',   kind: 'mult', cost: 100, effect: 2,  max: 1 },
-        { id: 'steel',   kind: 'mult', cost: 1e3, effect: 2,  max: 1 },
-        { id: 'diamond', kind: 'mult', cost: 1e5, effect: 2,  max: 1 },
-        { id: 'plasma',  kind: 'mult', cost: 1e7, effect: 2,  max: 1 },
-        { id: 'cosmic',  kind: 'mult', cost: 1e9, effect: 2,  max: 1 },
-        { id: 'divine',  kind: 'mult', cost: 1e12, effect: 2, max: 1 },
+        { id: 'hand',     kind: 'add',       cost: 15,   effect: 1,     mult: 1.15 },
+        { id: 'bicep',    kind: 'mult',      cost: 100,  effect: 2,     max: 1 },
+        { id: 'steel',    kind: 'mult',      cost: 1e3,  effect: 2,     max: 1 },
+        { id: 'diamond',  kind: 'mult',      cost: 1e5,  effect: 2,     max: 1 },
+        { id: 'plasma',   kind: 'mult',      cost: 1e7,  effect: 2,     max: 1 },
+        { id: 'cosmic',   kind: 'mult',      cost: 1e9,  effect: 2,     max: 1 },
+        { id: 'divine',   kind: 'mult',      cost: 1e12, effect: 2,     max: 1 },
+        { id: 'milkcran', kind: 'mps_share', cost: 5000, effect: 0.005, mult: 1.8 },
     ],
     buildings: [
         { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
@@ -85,7 +86,7 @@ const COW_CONFIG = {
     ],
     milestones: [25, 50, 100, 200, 300, 400, 500],
     prestigeBase: 1e9,
-    prestigeStep: 10,
+    prestigeStep: 12,
     prestigeMult: 5,
 };
 
@@ -161,7 +162,7 @@ const CHAIN_ACHIEVEMENTS = [
 const GOLDEN_BUFFS = [
     { id: 'lucky',       weight: 40, type: 'milk' },
     { id: 'frenzy',      weight: 30, type: 'mps',      mult: 7,   duration: 15000 },
-    { id: 'clickFrenzy', weight: 15, type: 'cp',       mult: 777, duration: 10000 },
+    { id: 'clickFrenzy', weight: 15, type: 'cp',       mult: 7,   duration: 10000 },
     { id: 'building',    weight: 10, type: 'building', mult: 2,   duration: 20000 },
     { id: 'milkRain',    weight: 5,  type: 'mps',      mult: 15,  duration: 10000 },
 ];
@@ -169,7 +170,7 @@ const GOLDEN_BUFFS = [
 const GOLDEN_BUFF_DESC = {
     lucky:       '✨ Удача! Мгновенное молоко',
     frenzy:      '🔥 Бешенство ×7 (15с)',
-    clickFrenzy: '💥 Бешеный клик ×777 (10с)',
+    clickFrenzy: '💥 Бешеный клик ×7 (10с)',
     building:    '🏭 Сила зданий ×2 (20с)',
     milkRain:    '🌊 Молочный дождь ×15 (10с)',
 };
@@ -261,13 +262,15 @@ function calcChainBonus(s) {
 }
 
 // ============================================================
-// РАСЧЁТ МАТЕМАТИКИ
+// РАСЧЁТ МАТЕМАТИКИ (ИСПРАВЛЕНО)
 // ============================================================
 function calcCowMath(s) {
+    // Достижения
     let achBonus = 0;
     for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
     achBonus += calcChainBonus(s);
 
+    // Глобальный множитель (mults × престиж × достижения)
     let gMult = 1;
     for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
@@ -277,9 +280,10 @@ function calcCowMath(s) {
     const buff = (s.activeBuff && s.activeBuff.endsAt > now) ? s.activeBuff : null;
 
     const mpsBonus = getSkinBonus(s, 'mps');
-    const cpBonus = getSkinBonus(s, 'cp');
+    const cpBonus  = getSkinBonus(s, 'cp');
 
-    let mps = 0;
+    // --- Сырой MPS (до глобальных множителей) ---
+    let rawMps = 0;
     const ownedMap = s.buildings;
     for (const b of COW_CONFIG.buildings) {
         const owned = ownedMap[b.id] || 0;
@@ -294,17 +298,26 @@ function calcCowMath(s) {
             }
         }
 
-        mps += owned * b.prod * mileMult * buildingBuff * synergyMult;
+        rawMps += owned * b.prod * mileMult * buildingBuff * synergyMult;
     }
 
-    let cp = 1;
+    const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
+    // ✅ ИСПРАВЛЕНО: mps теперь получает глобальный множитель, скин и бафф
+    const mps = rawMps * gMult * mpsBonus * mpsBuff;
+
+    // --- CLICK (база + множители + доля от mps) ---
+    let cpBase = 1;
+    let multCp = 1;
+    let mpsShare = 0;
     for (const u of COW_CONFIG.clickUps) {
         const owned = s.clickUps[u.id] || 0;
-        if (u.kind === 'mult') cp *= Math.pow(u.effect, owned);
-        else cp += owned * u.effect;
+        if (u.kind === 'mult') multCp *= Math.pow(u.effect, owned);
+        else if (u.kind === 'add') cpBase += owned * u.effect;
+        else if (u.kind === 'mps_share') mpsShare += owned * u.effect;
     }
     const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
-    cp *= gMult * cpBonus * cpBuff;
+    const cp = cpBase * multCp * gMult * cpBonus * cpBuff
+             + mps * mpsShare * cpBuff;
 
     return { mps, cp };
 }
