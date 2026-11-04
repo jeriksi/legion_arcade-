@@ -51,18 +51,18 @@ const COW_CONFIG = {
         { id: 'divine',  kind: 'mult', cost: 1e12, effect: 2, max: 1 },
     ],
     buildings: [
-        { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15 },
-        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15 },
-        { id: 'auto',     cost: 1.1e3,  prod: 8,     mult: 1.15 },
-        { id: 'plant',    cost: 12e3,   prod: 47,    mult: 1.15 },
-        { id: 'cheese',   cost: 130e3,  prod: 260,   mult: 1.15 },
-        { id: 'bank',     cost: 1.4e6,  prod: 1.4e3, mult: 1.15 },
-        { id: 'cosmo',    cost: 20e6,   prod: 7.8e3, mult: 1.15 },
-        { id: 'quantum',  cost: 330e6,  prod: 44e3,  mult: 1.15 },
-        { id: 'portal',   cost: 5.1e9,  prod: 260e3, mult: 1.15 },
-        { id: 'alchemy',  cost: 75e9,   prod: 1.6e6, mult: 1.15 },
-        { id: 'time',     cost: 1e12,   prod: 10e6,  mult: 1.15 },
-        { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15 },
+        { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
+        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15, synergy: { target: 'auto',     factor: 0.01 } },
+        { id: 'auto',     cost: 1.1e3,  prod: 8,     mult: 1.15, synergy: { target: 'plant',    factor: 0.01 } },
+        { id: 'plant',    cost: 12e3,   prod: 47,    mult: 1.15, synergy: { target: 'cheese',   factor: 0.01 } },
+        { id: 'cheese',   cost: 130e3,  prod: 260,   mult: 1.15, synergy: { target: 'bank',     factor: 0.01 } },
+        { id: 'bank',     cost: 1.4e6,  prod: 1.4e3, mult: 1.15, synergy: { target: 'cosmo',    factor: 0.01 } },
+        { id: 'cosmo',    cost: 20e6,   prod: 7.8e3, mult: 1.15, synergy: { target: 'quantum',  factor: 0.01 } },
+        { id: 'quantum',  cost: 330e6,  prod: 44e3,  mult: 1.15, synergy: { target: 'portal',   factor: 0.01 } },
+        { id: 'portal',   cost: 5.1e9,  prod: 260e3, mult: 1.15, synergy: { target: 'alchemy',  factor: 0.01 } },
+        { id: 'alchemy',  cost: 75e9,   prod: 1.6e6, mult: 1.15, synergy: { target: 'time',     factor: 0.01 } },
+        { id: 'time',     cost: 1e12,   prod: 10e6,  mult: 1.15, synergy: { target: 'infinity', factor: 0.01 } },
+        { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15, synergy: null },
     ],
     mults: [
         { id: 'hay',    cost: 1e4,  factor: 2 },
@@ -280,15 +280,22 @@ function calcCowMath(s) {
     const cpBonus = getSkinBonus(s, 'cp');
 
     let mps = 0;
+    const ownedMap = s.buildings;
     for (const b of COW_CONFIG.buildings) {
-        const owned = s.buildings[b.id] || 0;
+        const owned = ownedMap[b.id] || 0;
         let mileMult = 1;
         for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
         const buildingBuff = (buff && buff.type === 'building' && buff.buildingId === b.id) ? buff.mult : 1;
-        mps += owned * b.prod * mileMult * buildingBuff;
+
+        let synergyMult = 1;
+        for (const other of COW_CONFIG.buildings) {
+            if (other.synergy && other.synergy.target === b.id) {
+                synergyMult += (ownedMap[other.id] || 0) * other.synergy.factor;
+            }
+        }
+
+        mps += owned * b.prod * mileMult * buildingBuff * synergyMult;
     }
-    const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
-    mps *= gMult * mpsBonus * mpsBuff;
 
     let cp = 1;
     for (const u of COW_CONFIG.clickUps) {
