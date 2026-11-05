@@ -724,8 +724,8 @@ function syncCowLeaderboard(playerId, s) {
         if (score > existing.score) { existing.score = score; updated = true; }
         // Если ник в базе не 'guest' и не 'Аноним', обновляем его
         if (currentNickname && currentNickname !== 'guest' && currentNickname !== 'Аноним' && existing.nickname !== currentNickname) {
-            existing.nickname = currentNickname; 
-            updated = true; 
+            existing.nickname = currentNickname;
+            updated = true;
         }
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
@@ -736,6 +736,7 @@ function syncCowLeaderboard(playerId, s) {
     leaderboards['cowclicker'] = lb.slice(0, 10);
 }
 
+// ✅ ИСПРАВЛЕНО: сохраняем состояние в Redis
 app.post('/api/cow/sync', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
@@ -748,10 +749,30 @@ app.post('/api/cow/sync', async (req, res) => {
         }
     }
     const state = await getCowState(playerId);
+    await saveCowState(playerId); // ✅ ДОБАВЛЕНО
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, state });
 });
 
+// ✅ НОВЫЙ ЭНДПОИНТ: восстановление прогресса с клиента
+app.post('/api/cow/restore', async (req, res) => {
+    const playerId = getAuthedPlayerId(req);
+    if (!playerId) return res.status(401).json({ success: false });
+    const clientState = req.body && req.body.state;
+    if (!clientState) return res.status(400).json({ success: false });
+
+    const current = await getCowState(playerId);
+    if (current.totalMilk < clientState.totalMilk) {
+        const newState = { ...current, ...clientState, lastUpdate: Date.now() };
+        cowStates.set(playerId, newState);
+        await saveCowState(playerId);
+        syncCowLeaderboard(playerId, newState);
+        return res.json({ success: true, state: newState });
+    }
+    res.json({ success: true, state: current });
+});
+
+// ✅ ИСПРАВЛЕНО: сохраняем состояние в Redis
 app.post('/api/cow/click', async (req, res) => {
     const playerId = getAuthedPlayerId(req);
     if (!playerId) return res.status(401).json({ success: false });
@@ -778,6 +799,7 @@ app.post('/api/cow/click', async (req, res) => {
     state.clicksTotal = (state.clicksTotal || 0) + clicks;
     state.lastClickTime = now;
     state.lastUpdate = now;
+    await saveCowState(playerId); // ✅ ДОБАВЛЕНО
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, milk: state.milk, totalMilk: state.totalMilk });
 });
@@ -830,7 +852,7 @@ app.post('/api/cow/buy', async (req, res) => {
         state.multipliers[id] = true;
     }
 
-    saveCowState(playerId);
+    await saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, milk: state.milk });
 });
@@ -849,7 +871,7 @@ app.post('/api/cow/prestige', async (req, res) => {
     state.multipliers = {};
     const casesReward = state.prestigeLevel * 2;
     state.cases = (state.cases || 0) + casesReward;
-    saveCowState(playerId);
+    await saveCowState(playerId);
     res.json({ success: true, state, casesReward });
 });
 
@@ -860,7 +882,7 @@ app.post('/api/cow/claim-daily', async (req, res) => {
     if (Date.now() < (state.nextCaseTime || 0)) return res.status(400).json({ success: false, error: 'Кейс еще не готов' });
     state.cases += 1;
     state.nextCaseTime = getNextMidnightMSK();
-    saveCowState(playerId);
+    await saveCowState(playerId);
     res.json({ success: true, state });
 });
 
@@ -891,7 +913,7 @@ app.post('/api/cow/open-case', async (req, res) => {
     } else {
         state.unlockedSkins.push(selectedSkin.id);
     }
-    saveCowState(playerId);
+    await saveCowState(playerId);
     res.json({ success: true, skin: selectedSkin, isDuplicate, crystalsGained, state });
 });
 
@@ -916,7 +938,7 @@ app.post('/api/cow/shop', async (req, res) => {
         if (!state.unlockedSkins.includes(itemId)) return res.status(400).json({ success: false });
         state.currentSkin = itemId;
     }
-    saveCowState(playerId);
+    await saveCowState(playerId);
     res.json({ success: true, state });
 });
 
@@ -947,7 +969,7 @@ app.post('/api/cow/slime', async (req, res) => {
         state.crystals += rewardCrystals;
     }
 
-    saveCowState(playerId);
+    await saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, rewardMilk, rewardCrystals, state });
 });
@@ -957,7 +979,7 @@ app.post('/api/cow/slime/escape', async (req, res) => {
     if (!playerId) return res.status(401).json({ success: false });
     const state = await getCowState(playerId);
     state.milk = Math.floor(state.milk * 0.95);
-    saveCowState(playerId);
+    await saveCowState(playerId);
     res.json({ success: true, state });
 });
 
@@ -998,7 +1020,7 @@ app.post('/api/cow/golden-cow', async (req, res) => {
                 state.milk += rewardMilk;
                 state.totalMilk += rewardMilk;
                 buffDesc = GOLDEN_BUFF_DESC.lucky;
-                saveCowState(playerId);
+                await saveCowState(playerId);
                 syncCowLeaderboard(playerId, state);
                 return res.json({ success: true, state, rewardMilk, buffDesc });
             }
@@ -1016,7 +1038,7 @@ app.post('/api/cow/golden-cow', async (req, res) => {
         };
     }
 
-    saveCowState(playerId);
+    await saveCowState(playerId);
     syncCowLeaderboard(playerId, state);
     res.json({ success: true, state, rewardMilk, buffDesc });
 });
