@@ -42,47 +42,58 @@ async function redisPipeline(commands) {
 // ============================================================
 const COW_CONFIG = {
     clickUps: [
-        { id: 'hand',    kind: 'add', cost: 15,    effect: 1,   mult: 1.15 },
-        { id: 'hand2',   kind: 'add', cost: 150,   effect: 2,   mult: 1.15 },
-        { id: 'hand3',   kind: 'add', cost: 1500,  effect: 5,   mult: 1.15 },
-        
-        { id: 'milkcran', kind: 'mps_share', cost: 50000,      effect: 0.01, mult: 1.5 },
-        { id: 'share2',   kind: 'mps_share', cost: 5000000,    effect: 0.01, mult: 1.5 },
-        { id: 'share3',   kind: 'mps_share', cost: 500000000,  effect: 0.01, mult: 1.5 },
-        { id: 'share4',   kind: 'mps_share', cost: 50000000000,effect: 0.01, mult: 1.5 },
-        { id: 'share5',   kind: 'mps_share', cost: 5000000000000, effect: 0.01, mult: 1.5 },
-        { id: 'share6',   kind: 'mps_share', cost: 500000000000000, effect: 0.01, mult: 1.5 },
-        { id: 'share7',   kind: 'mps_share', cost: 50000000000000000, effect: 0.01, mult: 1.5 },
+        { id: 'hand',    kind: 'add', cost: 15,     effect: 1,    mult: 1.15 },
+        { id: 'hand2',   kind: 'add', cost: 100,    effect: 2,    mult: 1.15 },
+        { id: 'hand3',   kind: 'add', cost: 1100,   effect: 5,    mult: 1.15 },
+        { id: 'hand4',   kind: 'add', cost: 12000,  effect: 10,   mult: 1.15 },
+        { id: 'hand5',   kind: 'add', cost: 130000, effect: 25,   mult: 1.15 },
+        { id: 'hand6',   kind: 'add', cost: 1.4e6,  effect: 50,   mult: 1.15 },
+        { id: 'hand7',   kind: 'add', cost: 20e6,   effect: 100,  mult: 1.15 },
+        { id: 'hand8',   kind: 'add', cost: 330e6,  effect: 250,  mult: 1.15 },
+        { id: 'hand9',   kind: 'add', cost: 5.1e9,  effect: 500,  mult: 1.15 },
+        { id: 'hand10',  kind: 'add', cost: 75e9,   effect: 1000, mult: 1.15 },
     ],
     buildings: [
-        { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
-        { id: 'maid',     cost: 100,    prod: 1,     mult: 1.15, synergy: { target: 'auto',     factor: 0.01 } },
-        { id: 'auto',     cost: 1.1e3,  prod: 8,     mult: 1.15, synergy: { target: 'plant',    factor: 0.01 } },
-        { id: 'plant',    cost: 12e3,   prod: 47,    mult: 1.15, synergy: { target: 'cheese',   factor: 0.01 } },
-        { id: 'cheese',   cost: 130e3,  prod: 260,   mult: 1.15, synergy: { target: 'bank',     factor: 0.01 } },
-        { id: 'bank',     cost: 1.4e6,  prod: 1.4e3, mult: 1.15, synergy: { target: 'cosmo',    factor: 0.01 } },
-        { id: 'cosmo',    cost: 20e6,   prod: 7.8e3, mult: 1.15, synergy: { target: 'quantum',  factor: 0.01 } },
-        { id: 'quantum',  cost: 330e6,  prod: 44e3,  mult: 1.15, synergy: { target: 'portal',   factor: 0.01 } },
-        { id: 'portal',   cost: 5.1e9,  prod: 260e3, mult: 1.15, synergy: { target: 'alchemy',  factor: 0.01 } },
-        { id: 'alchemy',  cost: 75e9,   prod: 1.6e6, mult: 1.15, synergy: { target: 'time',     factor: 0.01 } },
-        { id: 'time',     cost: 1e12,   prod: 10e6,  mult: 1.15, synergy: { target: 'infinity', factor: 0.01 } },
-        { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15, synergy: null },
+        { id: 'cat',         cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',         factor: 0.001 } },
+        { id: 'maid',        cost: 100,    prod: 1,     mult: 1.15, synergy: { target: 'auto',         factor: 0.001 } },
+        { id: 'auto',        cost: 1.1e3,  prod: 8,     mult: 1.15, synergy: { target: 'plant',        factor: 0.001 } },
+        { id: 'plant',       cost: 12e3,   prod: 47,    mult: 1.15, synergy: { target: 'cheese',       factor: 0.001 } },
+        { id: 'cheese',      cost: 130e3,  prod: 260,   mult: 1.15, synergy: { target: 'bank',         factor: 0.001 } },
+        { id: 'bank',        cost: 1.4e6,  prod: 1.4e3, mult: 1.15, synergy: { target: 'cosmo',        factor: 0.001 } },
+        { id: 'cosmo',       cost: 20e6,   prod: 7.8e3, mult: 1.15, synergy: { target: 'quantum',      factor: 0.001 } },
+        { id: 'quantum',     cost: 330e6,  prod: 44e3,  mult: 1.15, synergy: { target: 'portal',       factor: 0.001 } },
+        { id: 'portal',      cost: 5.1e9,  prod: 260e3, mult: 1.15, synergy: { target: 'alchemy',      factor: 0.001 } },
+        { id: 'alchemy',     cost: 75e9,   prod: 1.6e6, mult: 1.15, synergy: { target: 'time',         factor: 0.001 } },
+        { id: 'time',        cost: 1e12,   prod: 10e6,  mult: 1.15, synergy: { target: 'infinity',     factor: 0.001 } },
+        { id: 'infinity',    cost: 14e12,  prod: 65e6,  mult: 1.15, synergy: { target: 'antimatter',   factor: 0.001 } },
+        { id: 'antimatter',  cost: 170e12, prod: 430e6, mult: 1.15, synergy: { target: 'prism',        factor: 0.001 } },
+        { id: 'prism',       cost: 2.1e15, prod: 2.9e9, mult: 1.15, synergy: { target: 'chancemaker',  factor: 0.001 } },
+        { id: 'chancemaker', cost: 26e15,  prod: 21e9,  mult: 1.15, synergy: { target: 'fractal',      factor: 0.001 } },
+        { id: 'fractal',     cost: 310e15, prod: 150e9, mult: 1.15, synergy: { target: 'console',      factor: 0.001 } },
+        { id: 'console',     cost: 71e17,  prod: 1.1e12,mult: 1.15, synergy: { target: 'idleverse',    factor: 0.001 } },
+        { id: 'idleverse',   cost: 12e19,  prod: 8.3e12,mult: 1.15, synergy: { target: 'cortex',       factor: 0.001 } },
+        { id: 'cortex',      cost: 1.9e21, prod: 64e12, mult: 1.15, synergy: { target: 'creator',      factor: 0.001 } },
+        { id: 'creator',     cost: 5.4e23, prod: 510e12,mult: 1.15, synergy: null },
     ],
     mults: [
-        { id: 'g_hay',    cost: 1e5,  factor: 2, type: 'global' },
-        { id: 'g_gmo',    cost: 1e7,  factor: 2, type: 'global' },
-        { id: 'g_wonder', cost: 1e9,  factor: 2, type: 'global' },
-        { id: 'g_nano',   cost: 1e11, factor: 2, type: 'global' },
-        { id: 'g_legend', cost: 1e14, factor: 3, type: 'global' },
-        { id: 'g_meta',   cost: 1e17, factor: 3, type: 'global' },
-        { id: 'g_void',   cost: 1e20, factor: 3, type: 'global' },
+        { id: 'g_hay',       cost: 1e5,  factor: 2, type: 'global' },
+        { id: 'g_gmo',       cost: 1e7,  factor: 2, type: 'global' },
+        { id: 'g_wonder',    cost: 1e9,  factor: 2, type: 'global' },
+        { id: 'g_nano',      cost: 1e11, factor: 2, type: 'global' },
+        { id: 'g_legend',    cost: 1e14, factor: 2, type: 'global' },
+        { id: 'g_meta',      cost: 1e17, factor: 2, type: 'global' },
+        { id: 'g_void',      cost: 1e20, factor: 3, type: 'global' },
+        { id: 'g_infinity',  cost: 1e23, factor: 3, type: 'global' },
+        { id: 'g_creator',   cost: 1e26, factor: 3, type: 'global' },
 
-        { id: 'c_bicep',   cost: 1e4,  factor: 2, type: 'click' },
-        { id: 'c_steel',   cost: 1e6,  factor: 2, type: 'click' },
-        { id: 'c_diamond', cost: 1e8,  factor: 2, type: 'click' },
-        { id: 'c_plasma',  cost: 1e10, factor: 2, type: 'click' },
-        { id: 'c_cosmic',  cost: 1e13, factor: 2, type: 'click' },
-        { id: 'c_divine',  cost: 1e16, factor: 2, type: 'click' },
+        { id: 'c_bicep',     cost: 1e4,  factor: 2, type: 'click' },
+        { id: 'c_steel',     cost: 1e6,  factor: 2, type: 'click' },
+        { id: 'c_diamond',   cost: 1e8,  factor: 2, type: 'click' },
+        { id: 'c_plasma',    cost: 1e10, factor: 2, type: 'click' },
+        { id: 'c_cosmic',    cost: 1e13, factor: 2, type: 'click' },
+        { id: 'c_divine',    cost: 1e16, factor: 2, type: 'click' },
+        { id: 'c_infinity',  cost: 1e19, factor: 2, type: 'click' },
+        { id: 'c_creator',   cost: 1e22, factor: 3, type: 'click' },
     ],
     achievements: [
         { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e5,  bonus: 0.01 },
@@ -94,8 +105,8 @@ const COW_CONFIG = {
         { threshold: 1e28, bonus: 0.10 }, { threshold: 1e31, bonus: 0.10 },
         { threshold: 1e34, bonus: 0.10 },
     ],
-    milestones: [25, 50, 100, 200, 300, 400, 500],
-    prestigeBase: 1e9,
+    milestones: [10, 25, 50, 100, 150, 200, 300, 400, 500],
+    prestigeBase: 1e12,
     prestigeStep: 12,
     prestigeMult: 5,
 };
@@ -107,61 +118,61 @@ const CHAIN_ACHIEVEMENTS = [
     {
         id: 'clicks', name: 'Кликер', icon: '💪',
         tiers: [
-            { threshold: 100,     bonus: 0.01 },
-            { threshold: 1000,    bonus: 0.01 },
-            { threshold: 10000,   bonus: 0.02 },
-            { threshold: 100000,  bonus: 0.02 },
-            { threshold: 1000000, bonus: 0.03 },
+            { threshold: 100,     bonus: 0.005 },
+            { threshold: 1000,    bonus: 0.005 },
+            { threshold: 10000,   bonus: 0.01 },
+            { threshold: 100000,  bonus: 0.01 },
+            { threshold: 1000000, bonus: 0.015 },
         ]
     },
     {
         id: 'golden', name: 'Охотник на коров', icon: '🐮✨',
         tiers: [
-            { threshold: 1,   bonus: 0.01 },
-            { threshold: 5,   bonus: 0.01 },
-            { threshold: 25,  bonus: 0.02 },
-            { threshold: 50,  bonus: 0.02 },
-            { threshold: 100, bonus: 0.03 },
+            { threshold: 1,   bonus: 0.005 },
+            { threshold: 5,   bonus: 0.005 },
+            { threshold: 25,  bonus: 0.01 },
+            { threshold: 50,  bonus: 0.01 },
+            { threshold: 100, bonus: 0.015 },
         ]
     },
     {
         id: 'slimes', name: 'Ловец слизней', icon: '🪱',
         tiers: [
-            { threshold: 1,   bonus: 0.01 },
-            { threshold: 10,  bonus: 0.01 },
+            { threshold: 1,   bonus: 0.005 },
+            { threshold: 10,  bonus: 0.005 },
             { threshold: 50,  bonus: 0.01 },
-            { threshold: 100, bonus: 0.02 },
-            { threshold: 500, bonus: 0.02 },
+            { threshold: 100, bonus: 0.01 },
+            { threshold: 500, bonus: 0.015 },
         ]
     },
     {
         id: 'cases', name: 'Коллекционер', icon: '📦',
         tiers: [
-            { threshold: 1,   bonus: 0.01 },
-            { threshold: 10,  bonus: 0.01 },
+            { threshold: 1,   bonus: 0.005 },
+            { threshold: 10,  bonus: 0.005 },
             { threshold: 50,  bonus: 0.01 },
-            { threshold: 100, bonus: 0.02 },
-            { threshold: 500, bonus: 0.02 },
+            { threshold: 100, bonus: 0.01 },
+            { threshold: 500, bonus: 0.015 },
         ]
     },
     {
         id: 'prestige', name: 'Перерождение', icon: '⭐',
         tiers: [
-            { threshold: 1,  bonus: 0.01 },
-            { threshold: 3,  bonus: 0.02 },
-            { threshold: 5,  bonus: 0.02 },
-            { threshold: 10, bonus: 0.03 },
-            { threshold: 20, bonus: 0.05 },
+            { threshold: 1,  bonus: 0.005 },
+            { threshold: 3,  bonus: 0.01 },
+            { threshold: 5,  bonus: 0.01 },
+            { threshold: 10, bonus: 0.015 },
+            { threshold: 20, bonus: 0.025 },
         ]
     },
     {
         id: 'buildings', name: 'Империя', icon: '🏠',
         tiers: [
-            { threshold: 10,   bonus: 0.01 },
-            { threshold: 100,  bonus: 0.01 },
-            { threshold: 500,  bonus: 0.02 },
-            { threshold: 1000, bonus: 0.02 },
-            { threshold: 5000, bonus: 0.03 },
+            { threshold: 10,   bonus: 0.005 },
+            { threshold: 100,  bonus: 0.005 },
+            { threshold: 500,  bonus: 0.01 },
+            { threshold: 1000, bonus: 0.01 },
+            { threshold: 5000, bonus: 0.015 },
         ]
     },
 ];
@@ -171,9 +182,9 @@ const CHAIN_ACHIEVEMENTS = [
 // ============================================================
 const GOLDEN_BUFFS = [
     { id: 'lucky',       weight: 40, type: 'milk' },
-    { id: 'frenzy',      weight: 30, type: 'mps',      mult: 7,   duration: 15000 },
-    { id: 'clickFrenzy', weight: 15, type: 'cp',       mult: 7,   duration: 10000 },
-    { id: 'building',    weight: 10, type: 'building', mult: 2,   duration: 20000 },
+    { id: 'frenzy',      weight: 30, type: 'mps',      mult: 7,   duration: 35000 },
+    { id: 'clickFrenzy', weight: 15, type: 'cp',       mult: 7,   duration: 12000 },
+    { id: 'building',    weight: 10, type: 'building', mult: 2,   duration: 25000 },
     { id: 'milkRain',    weight: 5,  type: 'mps',      mult: 15,  duration: 10000 },
 ];
 
@@ -275,12 +286,10 @@ function calcChainBonus(s) {
 // РАСЧЁТ МАТЕМАТИКИ
 // ============================================================
 function calcCowMath(s) {
-    // Достижения
     let achBonus = 0;
     for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
     achBonus += calcChainBonus(s);
 
-    // Глобальный множитель и Множитель клика
     let gMult = 1;
     let cpMultBonus = 1;
     for (const m of COW_CONFIG.mults) {
@@ -294,7 +303,6 @@ function calcCowMath(s) {
 
     const now = Date.now();
     const buff = (s.activeBuff && s.activeBuff.endsAt > now) ? s.activeBuff : null;
-
     const mpsBonus = getSkinBonus(s, 'mps');
     const cpBonus  = getSkinBonus(s, 'cp');
 
@@ -320,16 +328,12 @@ function calcCowMath(s) {
 
     // --- CLICK ---
     let cpBase = 1;
-    let mpsShare = 0;
     for (const u of COW_CONFIG.clickUps) {
         const owned = s.clickUps[u.id] || 0;
         if (u.kind === 'add') cpBase += owned * u.effect;
-        else if (u.kind === 'mps_share') mpsShare += owned * u.effect;
     }
     const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
-    
-    // База клика * Множитель клика * Глобальный * Скин * Бафф
-    const cp = cpBase * cpMultBonus * gMult * cpBonus * cpBuff + mps * mpsShare * cpBuff;
+    const cp = cpBase * cpMultBonus * gMult * cpBonus * cpBuff;
 
     return { mps, cp };
 }
