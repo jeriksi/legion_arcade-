@@ -722,7 +722,11 @@ function syncCowLeaderboard(playerId, s) {
     if (existing) {
         let updated = false;
         if (score > existing.score) { existing.score = score; updated = true; }
-        if (currentNickname && existing.nickname !== currentNickname) { existing.nickname = currentNickname; updated = true; }
+        // Если ник в базе не 'guest' и не 'Аноним', обновляем его
+        if (currentNickname && currentNickname !== 'guest' && currentNickname !== 'Аноним' && existing.nickname !== currentNickname) {
+            existing.nickname = currentNickname; 
+            updated = true; 
+        }
         if (updated) { existing.date = Date.now(); isLeaderboardDirty = true; }
     } else if (score > 0) {
         lb.push({ playerId, nickname: currentNickname || 'Загрузка...', score, losses: 0, date: Date.now() });
