@@ -45,11 +45,14 @@ const COW_CONFIG = {
         { id: 'hand',    kind: 'add', cost: 15,    effect: 1,   mult: 1.15 },
         { id: 'hand2',   kind: 'add', cost: 150,   effect: 2,   mult: 1.15 },
         { id: 'hand3',   kind: 'add', cost: 1500,  effect: 5,   mult: 1.15 },
+        
         { id: 'milkcran', kind: 'mps_share', cost: 50000,      effect: 0.01, mult: 1.5 },
         { id: 'share2',   kind: 'mps_share', cost: 5000000,    effect: 0.01, mult: 1.5 },
         { id: 'share3',   kind: 'mps_share', cost: 500000000,  effect: 0.01, mult: 1.5 },
         { id: 'share4',   kind: 'mps_share', cost: 50000000000,effect: 0.01, mult: 1.5 },
         { id: 'share5',   kind: 'mps_share', cost: 5000000000000, effect: 0.01, mult: 1.5 },
+        { id: 'share6',   kind: 'mps_share', cost: 500000000000000, effect: 0.01, mult: 1.5 },
+        { id: 'share7',   kind: 'mps_share', cost: 50000000000000000, effect: 0.01, mult: 1.5 },
     ],
     buildings: [
         { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
@@ -96,66 +99,6 @@ const COW_CONFIG = {
     prestigeStep: 12,
     prestigeMult: 5,
 };
-
-function calcCowMath(s) {
-    // Достижения
-    let achBonus = 0;
-    for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
-    achBonus += calcChainBonus(s);
-
-    // Глобальный множитель и Множитель клика
-    let gMult = 1;
-    let cpMultBonus = 1;
-    for (const m of COW_CONFIG.mults) {
-        if (s.multipliers[m.id]) {
-            if (m.type === 'click') cpMultBonus *= m.factor;
-            else gMult *= m.factor;
-        }
-    }
-    gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
-    gMult *= (1 + achBonus);
-
-    const now = Date.now();
-    const buff = (s.activeBuff && s.activeBuff.endsAt > now) ? s.activeBuff : null;
-
-    const mpsBonus = getSkinBonus(s, 'mps');
-    const cpBonus  = getSkinBonus(s, 'cp');
-
-    // --- MPS ---
-    let rawMps = 0;
-    const ownedMap = s.buildings;
-    for (const b of COW_CONFIG.buildings) {
-        const owned = ownedMap[b.id] || 0;
-        let mileMult = 1;
-        for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
-        const buildingBuff = (buff && buff.type === 'building' && buff.buildingId === b.id) ? buff.mult : 1;
-
-        let synergyMult = 1;
-        for (const other of COW_CONFIG.buildings) {
-            if (other.synergy && other.synergy.target === b.id) {
-                synergyMult += (ownedMap[other.id] || 0) * other.synergy.factor;
-            }
-        }
-        rawMps += owned * b.prod * mileMult * buildingBuff * synergyMult;
-    }
-    const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
-    const mps = rawMps * gMult * mpsBonus * mpsBuff;
-
-    // --- CLICK ---
-    let cpBase = 1;
-    let mpsShare = 0;
-    for (const u of COW_CONFIG.clickUps) {
-        const owned = s.clickUps[u.id] || 0;
-        if (u.kind === 'add') cpBase += owned * u.effect;
-        else if (u.kind === 'mps_share') mpsShare += owned * u.effect;
-    }
-    const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
-    
-    // База клика * Множитель клика * Глобальный * Скин * Бафф
-    const cp = cpBase * cpMultBonus * gMult * cpBonus * cpBuff + mps * mpsShare * cpBuff;
-
-    return { mps, cp };
-}
 
 // ============================================================
 // ЦЕПОЧКИ ДОСТИЖЕНИЙ
@@ -329,7 +272,7 @@ function calcChainBonus(s) {
 }
 
 // ============================================================
-// РАСЧЁТ МАТЕМАТИКИ (ИСПРАВЛЕНО)
+// РАСЧЁТ МАТЕМАТИКИ
 // ============================================================
 function calcCowMath(s) {
     // Достижения
@@ -337,9 +280,15 @@ function calcCowMath(s) {
     for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
     achBonus += calcChainBonus(s);
 
-    // Глобальный множитель (mults × престиж × достижения)
+    // Глобальный множитель и Множитель клика
     let gMult = 1;
-    for (const m of COW_CONFIG.mults) if (s.multipliers[m.id]) gMult *= m.factor;
+    let cpMultBonus = 1;
+    for (const m of COW_CONFIG.mults) {
+        if (s.multipliers[m.id]) {
+            if (m.type === 'click') cpMultBonus *= m.factor;
+            else gMult *= m.factor;
+        }
+    }
     gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
     gMult *= (1 + achBonus);
 
@@ -349,7 +298,7 @@ function calcCowMath(s) {
     const mpsBonus = getSkinBonus(s, 'mps');
     const cpBonus  = getSkinBonus(s, 'cp');
 
-    // --- Сырой MPS (до глобальных множителей) ---
+    // --- MPS ---
     let rawMps = 0;
     const ownedMap = s.buildings;
     for (const b of COW_CONFIG.buildings) {
@@ -364,27 +313,23 @@ function calcCowMath(s) {
                 synergyMult += (ownedMap[other.id] || 0) * other.synergy.factor;
             }
         }
-
         rawMps += owned * b.prod * mileMult * buildingBuff * synergyMult;
     }
-
     const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
-    // ✅ ИСПРАВЛЕНО: mps теперь получает глобальный множитель, скин и бафф
     const mps = rawMps * gMult * mpsBonus * mpsBuff;
 
-    // --- CLICK (база + множители + доля от mps) ---
+    // --- CLICK ---
     let cpBase = 1;
-    let multCp = 1;
     let mpsShare = 0;
     for (const u of COW_CONFIG.clickUps) {
         const owned = s.clickUps[u.id] || 0;
-        if (u.kind === 'mult') multCp *= Math.pow(u.effect, owned);
-        else if (u.kind === 'add') cpBase += owned * u.effect;
+        if (u.kind === 'add') cpBase += owned * u.effect;
         else if (u.kind === 'mps_share') mpsShare += owned * u.effect;
     }
     const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
-    const cp = cpBase * multCp * gMult * cpBonus * cpBuff
-             + mps * mpsShare * cpBuff;
+    
+    // База клика * Множитель клика * Глобальный * Скин * Бафф
+    const cp = cpBase * cpMultBonus * gMult * cpBonus * cpBuff + mps * mpsShare * cpBuff;
 
     return { mps, cp };
 }
