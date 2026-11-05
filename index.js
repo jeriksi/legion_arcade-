@@ -42,19 +42,14 @@ async function redisPipeline(commands) {
 // ============================================================
 const COW_CONFIG = {
     clickUps: [
-        // Базовые добавки
         { id: 'hand',    kind: 'add', cost: 15,    effect: 1,   mult: 1.15 },
-        { id: 'hand2',   kind: 'add', cost: 100,   effect: 2,   mult: 1.15 },
-        { id: 'hand3',   kind: 'add', cost: 500,   effect: 5,   mult: 1.15 },
-        { id: 'hand4',   kind: 'add', cost: 5000,  effect: 20,  mult: 1.15 },
-        { id: 'hand5',   kind: 'add', cost: 50000, effect: 100, mult: 1.15 },
-
-        // Доля от MPS
-        { id: 'milkcran', kind: 'mps_share', cost: 1000,      effect: 0.01, mult: 1.5 },
-        { id: 'share2',   kind: 'mps_share', cost: 25000,     effect: 0.01, mult: 1.5 },
-        { id: 'share3',   kind: 'mps_share', cost: 500000,    effect: 0.01, mult: 1.5 },
-        { id: 'share4',   kind: 'mps_share', cost: 10000000,  effect: 0.01, mult: 1.5 },
-        { id: 'share5',   kind: 'mps_share', cost: 250000000, effect: 0.01, mult: 1.5 },
+        { id: 'hand2',   kind: 'add', cost: 150,   effect: 2,   mult: 1.15 },
+        { id: 'hand3',   kind: 'add', cost: 1500,  effect: 5,   mult: 1.15 },
+        { id: 'milkcran', kind: 'mps_share', cost: 50000,      effect: 0.01, mult: 1.5 },
+        { id: 'share2',   kind: 'mps_share', cost: 5000000,    effect: 0.01, mult: 1.5 },
+        { id: 'share3',   kind: 'mps_share', cost: 500000000,  effect: 0.01, mult: 1.5 },
+        { id: 'share4',   kind: 'mps_share', cost: 50000000000,effect: 0.01, mult: 1.5 },
+        { id: 'share5',   kind: 'mps_share', cost: 5000000000000, effect: 0.01, mult: 1.5 },
     ],
     buildings: [
         { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
@@ -71,22 +66,20 @@ const COW_CONFIG = {
         { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15, synergy: null },
     ],
     mults: [
-        // Глобальные
-        { id: 'g_hay',    cost: 1e4,  factor: 2, type: 'global' },
-        { id: 'g_gmo',    cost: 1e6,  factor: 2, type: 'global' },
-        { id: 'g_wonder', cost: 1e8,  factor: 2, type: 'global' },
-        { id: 'g_nano',   cost: 1e10, factor: 2, type: 'global' },
-        { id: 'g_legend', cost: 1e12, factor: 3, type: 'global' },
-        { id: 'g_meta',   cost: 1e15, factor: 3, type: 'global' },
-        { id: 'g_void',   cost: 1e18, factor: 3, type: 'global' },
-        
-        // Клик
-        { id: 'c_bicep',   cost: 10000,       factor: 2, type: 'click' },
-        { id: 'c_steel',   cost: 100000,      factor: 2, type: 'click' },
-        { id: 'c_diamond', cost: 1000000,     factor: 2, type: 'click' },
-        { id: 'c_plasma',  cost: 20000000,    factor: 2, type: 'click' },
-        { id: 'c_cosmic',  cost: 500000000,   factor: 2, type: 'click' },
-        { id: 'c_divine',  cost: 10000000000, factor: 2, type: 'click' },
+        { id: 'g_hay',    cost: 1e5,  factor: 2, type: 'global' },
+        { id: 'g_gmo',    cost: 1e7,  factor: 2, type: 'global' },
+        { id: 'g_wonder', cost: 1e9,  factor: 2, type: 'global' },
+        { id: 'g_nano',   cost: 1e11, factor: 2, type: 'global' },
+        { id: 'g_legend', cost: 1e14, factor: 3, type: 'global' },
+        { id: 'g_meta',   cost: 1e17, factor: 3, type: 'global' },
+        { id: 'g_void',   cost: 1e20, factor: 3, type: 'global' },
+
+        { id: 'c_bicep',   cost: 1e4,  factor: 2, type: 'click' },
+        { id: 'c_steel',   cost: 1e6,  factor: 2, type: 'click' },
+        { id: 'c_diamond', cost: 1e8,  factor: 2, type: 'click' },
+        { id: 'c_plasma',  cost: 1e10, factor: 2, type: 'click' },
+        { id: 'c_cosmic',  cost: 1e13, factor: 2, type: 'click' },
+        { id: 'c_divine',  cost: 1e16, factor: 2, type: 'click' },
     ],
     achievements: [
         { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e5,  bonus: 0.01 },
