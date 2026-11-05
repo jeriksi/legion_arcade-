@@ -42,14 +42,19 @@ async function redisPipeline(commands) {
 // ============================================================
 const COW_CONFIG = {
     clickUps: [
-        { id: 'hand',     kind: 'add',       cost: 15,   effect: 1,     mult: 1.15 },
-        { id: 'bicep',    kind: 'mult',      cost: 100,  effect: 2,     max: 1 },
-        { id: 'steel',    kind: 'mult',      cost: 1e3,  effect: 2,     max: 1 },
-        { id: 'diamond',  kind: 'mult',      cost: 1e5,  effect: 2,     max: 1 },
-        { id: 'plasma',   kind: 'mult',      cost: 1e7,  effect: 2,     max: 1 },
-        { id: 'cosmic',   kind: 'mult',      cost: 1e9,  effect: 2,     max: 1 },
-        { id: 'divine',   kind: 'mult',      cost: 1e12, effect: 2,     max: 1 },
-        { id: 'milkcran', kind: 'mps_share', cost: 5000, effect: 0.005, mult: 1.8 },
+        // Базовые добавки
+        { id: 'hand',    kind: 'add', cost: 15,    effect: 1,   mult: 1.15 },
+        { id: 'hand2',   kind: 'add', cost: 100,   effect: 2,   mult: 1.15 },
+        { id: 'hand3',   kind: 'add', cost: 500,   effect: 5,   mult: 1.15 },
+        { id: 'hand4',   kind: 'add', cost: 5000,  effect: 20,  mult: 1.15 },
+        { id: 'hand5',   kind: 'add', cost: 50000, effect: 100, mult: 1.15 },
+
+        // Доля от MPS
+        { id: 'milkcran', kind: 'mps_share', cost: 1000,      effect: 0.01, mult: 1.5 },
+        { id: 'share2',   kind: 'mps_share', cost: 25000,     effect: 0.01, mult: 1.5 },
+        { id: 'share3',   kind: 'mps_share', cost: 500000,    effect: 0.01, mult: 1.5 },
+        { id: 'share4',   kind: 'mps_share', cost: 10000000,  effect: 0.01, mult: 1.5 },
+        { id: 'share5',   kind: 'mps_share', cost: 250000000, effect: 0.01, mult: 1.5 },
     ],
     buildings: [
         { id: 'cat',      cost: 15,     prod: 0.1,   mult: 1.15, synergy: { target: 'maid',     factor: 0.01 } },
@@ -66,13 +71,22 @@ const COW_CONFIG = {
         { id: 'infinity', cost: 14e12,  prod: 65e6,  mult: 1.15, synergy: null },
     ],
     mults: [
-        { id: 'hay',    cost: 1e4,  factor: 2 },
-        { id: 'gmo',    cost: 1e6,  factor: 2 },
-        { id: 'wonder', cost: 1e8,  factor: 2 },
-        { id: 'nano',   cost: 1e10, factor: 2 },
-        { id: 'legend', cost: 1e12, factor: 3 },
-        { id: 'meta',   cost: 1e15, factor: 3 },
-        { id: 'void',   cost: 1e18, factor: 3 },
+        // Глобальные
+        { id: 'g_hay',    cost: 1e4,  factor: 2, type: 'global' },
+        { id: 'g_gmo',    cost: 1e6,  factor: 2, type: 'global' },
+        { id: 'g_wonder', cost: 1e8,  factor: 2, type: 'global' },
+        { id: 'g_nano',   cost: 1e10, factor: 2, type: 'global' },
+        { id: 'g_legend', cost: 1e12, factor: 3, type: 'global' },
+        { id: 'g_meta',   cost: 1e15, factor: 3, type: 'global' },
+        { id: 'g_void',   cost: 1e18, factor: 3, type: 'global' },
+        
+        // Клик
+        { id: 'c_bicep',   cost: 10000,       factor: 2, type: 'click' },
+        { id: 'c_steel',   cost: 100000,      factor: 2, type: 'click' },
+        { id: 'c_diamond', cost: 1000000,     factor: 2, type: 'click' },
+        { id: 'c_plasma',  cost: 20000000,    factor: 2, type: 'click' },
+        { id: 'c_cosmic',  cost: 500000000,   factor: 2, type: 'click' },
+        { id: 'c_divine',  cost: 10000000000, factor: 2, type: 'click' },
     ],
     achievements: [
         { threshold: 1e3,  bonus: 0.01 }, { threshold: 1e5,  bonus: 0.01 },
@@ -89,6 +103,66 @@ const COW_CONFIG = {
     prestigeStep: 12,
     prestigeMult: 5,
 };
+
+function calcCowMath(s) {
+    // Достижения
+    let achBonus = 0;
+    for (const a of COW_CONFIG.achievements) if (s.totalMilk >= a.threshold) achBonus += a.bonus;
+    achBonus += calcChainBonus(s);
+
+    // Глобальный множитель и Множитель клика
+    let gMult = 1;
+    let cpMultBonus = 1;
+    for (const m of COW_CONFIG.mults) {
+        if (s.multipliers[m.id]) {
+            if (m.type === 'click') cpMultBonus *= m.factor;
+            else gMult *= m.factor;
+        }
+    }
+    gMult *= Math.pow(COW_CONFIG.prestigeMult, s.prestigeLevel);
+    gMult *= (1 + achBonus);
+
+    const now = Date.now();
+    const buff = (s.activeBuff && s.activeBuff.endsAt > now) ? s.activeBuff : null;
+
+    const mpsBonus = getSkinBonus(s, 'mps');
+    const cpBonus  = getSkinBonus(s, 'cp');
+
+    // --- MPS ---
+    let rawMps = 0;
+    const ownedMap = s.buildings;
+    for (const b of COW_CONFIG.buildings) {
+        const owned = ownedMap[b.id] || 0;
+        let mileMult = 1;
+        for (const t of COW_CONFIG.milestones) if (owned >= t) mileMult *= 2;
+        const buildingBuff = (buff && buff.type === 'building' && buff.buildingId === b.id) ? buff.mult : 1;
+
+        let synergyMult = 1;
+        for (const other of COW_CONFIG.buildings) {
+            if (other.synergy && other.synergy.target === b.id) {
+                synergyMult += (ownedMap[other.id] || 0) * other.synergy.factor;
+            }
+        }
+        rawMps += owned * b.prod * mileMult * buildingBuff * synergyMult;
+    }
+    const mpsBuff = (buff && buff.type === 'mps') ? buff.mult : 1;
+    const mps = rawMps * gMult * mpsBonus * mpsBuff;
+
+    // --- CLICK ---
+    let cpBase = 1;
+    let mpsShare = 0;
+    for (const u of COW_CONFIG.clickUps) {
+        const owned = s.clickUps[u.id] || 0;
+        if (u.kind === 'add') cpBase += owned * u.effect;
+        else if (u.kind === 'mps_share') mpsShare += owned * u.effect;
+    }
+    const cpBuff = (buff && buff.type === 'cp') ? buff.mult : 1;
+    
+    // База клика * Множитель клика * Глобальный * Скин * Бафф
+    const cp = cpBase * cpMultBonus * gMult * cpBonus * cpBuff + mps * mpsShare * cpBuff;
+
+    return { mps, cp };
+}
 
 // ============================================================
 // ЦЕПОЧКИ ДОСТИЖЕНИЙ
